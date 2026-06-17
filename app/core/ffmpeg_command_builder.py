@@ -8,6 +8,13 @@ from app.utils.timecode import seconds_to_timecode
 
 
 @dataclass(frozen=True)
+class TimelineAudioClip:
+    path: Path
+    timeline_start: float
+    loop: bool = True
+
+
+@dataclass(frozen=True)
 class ExportSettings:
     input_path: Path
     output_path: Path
@@ -16,6 +23,7 @@ class ExportSettings:
     width: int | None = None
     audio_mode: str = "keep"
     replacement_audio_path: Path | None = None
+    replacement_audio_clips: tuple[TimelineAudioClip, ...] = ()
     format_name: str = "mp4"
     video_crf: int | None = None
     crop: tuple[int, int, int, int] | None = None
@@ -23,11 +31,16 @@ class ExportSettings:
     output_height: int | None = None
     loop_audio: bool = True
     video_segments: tuple[tuple[float, float], ...] = ()
+    video_segment_timeline_starts: tuple[float, ...] = ()
+    video_segment_audio_muted: tuple[bool, ...] = ()
+    audio_timeline_start: float = 0.0
+    source_width: int = 1280
+    source_height: int = 720
 
 
 def build_ffmpeg_command(settings: ExportSettings) -> list[str]:
     command = ["ffmpeg", "-hide_banner", "-y", "-nostdin"]
-    has_segments = len(settings.video_segments) > 1
+    has_segments = _needs_complex_video_filter(settings)
     video_filter = None
 
     if settings.trim_start > 0 and not has_segments:
@@ -38,14 +51,24 @@ def build_ffmpeg_command(settings: ExportSettings) -> list[str]:
     command.extend(["-i", str(settings.input_path)])
 
     if settings.audio_mode == "replace":
-        if settings.replacement_audio_path is None:
+        replacement_clips = settings.replacement_audio_clips
+        if not replacement_clips and settings.replacement_audio_path is not None:
+            replacement_clips = (
+                TimelineAudioClip(settings.replacement_audio_path, settings.audio_timeline_start, settings.loop_audio),
+            )
+        if not replacement_clips:
             raise ValueError("replacement_audio_path is required when audio_mode is replace")
-        if settings.loop_audio:
-            command.extend(["-stream_loop", "-1"])
-        command.extend(["-i", str(settings.replacement_audio_path)])
+        for clip in replacement_clips:
+            if clip.timeline_start > 0:
+                command.extend(["-itsoffset", seconds_to_timecode(clip.timeline_start)])
+            if clip.loop:
+                command.extend(["-stream_loop", "-1"])
+            command.extend(["-i", str(clip.path)])
 
     if has_segments:
         command.extend(["-filter_complex", _build_segment_filter(settings)])
+    elif settings.audio_mode == "replace" and len(settings.replacement_audio_clips) > 1:
+        command.extend(["-filter_complex", _build_audio_mix_filter(len(settings.replacement_audio_clips))])
     else:
         video_filter = _build_video_filter(settings)
         if video_filter:
@@ -56,12 +79,21 @@ def build_ffmpeg_command(settings: ExportSettings) -> list[str]:
         if settings.audio_mode == "keep":
             command.extend(["-map", "[aout]"])
         elif settings.audio_mode == "replace":
-            command.extend(["-map", "1:a:0", "-shortest"])
+            if len(settings.replacement_audio_clips) > 1:
+                command.extend(["-map", "[mixout]", "-shortest"])
+            else:
+                command.extend(["-map", "1:a:0", "-shortest"])
+    elif settings.audio_mode == "replace" and len(settings.replacement_audio_clips) > 1:
+        command.extend(["-map", "0:v:0", "-map", "[mixout]", "-shortest"])
     command.extend(_format_video_args(settings.format_name, settings.video_crf))
 
     if settings.audio_mode == "mute":
         command.append("-an")
-    elif settings.audio_mode == "replace" and not has_segments:
+    elif (
+        settings.audio_mode == "replace"
+        and not has_segments
+        and len(settings.replacement_audio_clips) <= 1
+    ):
         command.extend(["-map", "0:v:0", "-map", "1:a:0", "-shortest"])
         command.extend(_format_audio_args(settings.format_name, replacement=True))
     elif settings.audio_mode == "replace":
@@ -86,27 +118,59 @@ def export_settings_from_project(
     if state.source_video_path is None:
         raise ValueError("No source video loaded")
 
+    audio_clips = tuple(
+        TimelineAudioClip(clip.path, clip.timeline_start, loop_timeline_audio and clip.loop)
+        for clip in state.active_audio_clips()
+    )
     audio_clip = state.active_audio_clip()
     replacement_audio = audio_clip.path if audio_mode == "timeline" and audio_clip else None
-    resolved_audio_mode = "replace" if replacement_audio is not None else audio_mode
+    resolved_audio_mode = "replace" if audio_mode == "timeline" and audio_clips else audio_mode
     if resolved_audio_mode == "timeline":
+        resolved_audio_mode = "mute"
+    if resolved_audio_mode == "keep" and (not state.original_audio_enabled or state.original_audio_track.muted):
+        resolved_audio_mode = "mute"
+    video_clips = sorted(state.active_video_segments(), key=lambda item: item.timeline_start)
+    if not video_clips:
+        raise ValueError("No video clips remain on the timeline")
+    video_segments = tuple((clip.source_in, clip.source_out) for clip in video_clips)
+    video_segment_timeline_starts = tuple(clip.timeline_start for clip in video_clips)
+    segment_audio_muted = tuple(_linked_audio_muted(state, clip) for clip in video_clips)
+    if resolved_audio_mode == "keep" and len(video_clips) == 1 and segment_audio_muted[0]:
         resolved_audio_mode = "mute"
 
     return ExportSettings(
-        input_path=state.source_video_path,
+        input_path=state.working_video_path or state.source_video_path,
         output_path=output_path,
-        trim_start=state.trim_start,
-        trim_end=state.trim_end,
+        trim_start=video_segments[0][0] if len(video_segments) == 1 else state.trim_start,
+        trim_end=video_segments[0][1] if len(video_segments) == 1 else state.trim_end,
         audio_mode=resolved_audio_mode,
         replacement_audio_path=replacement_audio,
+        replacement_audio_clips=audio_clips if resolved_audio_mode == "replace" else (),
         format_name=format_name,
         video_crf=video_crf,
         crop=_source_crop_pixels(state),
         output_width=output_width,
         output_height=output_height,
         loop_audio=loop_timeline_audio and (audio_clip.loop if audio_clip else True),
-        video_segments=tuple((segment.start, segment.end) for segment in state.active_video_segments()),
+        video_segments=video_segments,
+        video_segment_timeline_starts=video_segment_timeline_starts,
+        video_segment_audio_muted=segment_audio_muted,
+        audio_timeline_start=audio_clip.timeline_start if audio_clip else 0.0,
+        source_width=state.working_width or state.source_width or 1280,
+        source_height=state.working_height or state.source_height or 720,
     )
+
+
+def _linked_audio_muted(state: ProjectState, video_clip: object) -> bool:
+    linked_group_id = getattr(video_clip, "linked_group_id", None)
+    if linked_group_id is None:
+        return not state.original_audio_enabled
+    linked_audio = [
+        clip
+        for clip in state.original_audio_track.clips
+        if clip.linked_group_id == linked_group_id and clip.type == "audio"
+    ]
+    return not linked_audio or any(clip.muted for clip in linked_audio)
 
 
 def _format_video_args(format_name: str, video_crf: int | None) -> list[str]:
@@ -120,6 +184,19 @@ def _format_audio_args(format_name: str, replacement: bool) -> list[str]:
     if format_name == "webm":
         return ["-c:a", "libopus", "-b:a", bitrate]
     return ["-c:a", "aac", "-b:a", bitrate]
+
+
+def _build_audio_mix_filter(input_count: int) -> str:
+    labels = "".join(f"[{index}:a:0]" for index in range(1, input_count + 1))
+    return f"{labels}amix=inputs={input_count}:duration=longest:dropout_transition=0[mixout]"
+
+
+def _needs_complex_video_filter(settings: ExportSettings) -> bool:
+    if len(settings.video_segments) > 1:
+        return True
+    if settings.video_segments and settings.video_segment_timeline_starts:
+        return settings.video_segment_timeline_starts[0] > 0.001
+    return False
 
 
 def _build_video_filter(settings: ExportSettings) -> str | None:
@@ -140,7 +217,28 @@ def _build_segment_filter(settings: ExportSettings) -> str:
     parts: list[str] = []
     video_labels: list[str] = []
     audio_labels: list[str] = []
+    current_time = 0.0
     for index, (start, end) in enumerate(settings.video_segments):
+        timeline_start = (
+            settings.video_segment_timeline_starts[index]
+            if index < len(settings.video_segment_timeline_starts)
+            else current_time
+        )
+        gap = max(timeline_start - current_time, 0.0)
+        if gap > 0.001:
+            gap_video_label = f"gapv{index}"
+            parts.append(
+                f"color=c=black:s={settings.source_width}x{settings.source_height}:d={gap:.3f},"
+                f"format=yuv420p[{gap_video_label}]"
+            )
+            video_labels.append(f"[{gap_video_label}]")
+            if settings.audio_mode == "keep":
+                gap_audio_label = f"gapa{index}"
+                parts.append(
+                    f"anullsrc=channel_layout=stereo:sample_rate=48000,"
+                    f"atrim=duration={gap:.3f},asetpts=PTS-STARTPTS[{gap_audio_label}]"
+                )
+                audio_labels.append(f"[{gap_audio_label}]")
         video_label = f"v{index}"
         parts.append(
             f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS[{video_label}]"
@@ -148,10 +246,23 @@ def _build_segment_filter(settings: ExportSettings) -> str:
         video_labels.append(f"[{video_label}]")
         if settings.audio_mode == "keep":
             audio_label = f"a{index}"
-            parts.append(
-                f"[0:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[{audio_label}]"
+            audio_muted = (
+                settings.video_segment_audio_muted[index]
+                if index < len(settings.video_segment_audio_muted)
+                else False
             )
+            if audio_muted:
+                duration = max(end - start, 0.001)
+                parts.append(
+                    f"anullsrc=channel_layout=stereo:sample_rate=48000,"
+                    f"atrim=duration={duration:.3f},asetpts=PTS-STARTPTS[{audio_label}]"
+                )
+            else:
+                parts.append(
+                    f"[0:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[{audio_label}]"
+                )
             audio_labels.append(f"[{audio_label}]")
+        current_time = timeline_start + max(end - start, 0.0)
 
     if settings.audio_mode == "keep":
         parts.append(
@@ -168,6 +279,8 @@ def _build_segment_filter(settings: ExportSettings) -> str:
         parts.append(f"{video_input}{video_filter}[vout]")
     else:
         parts.append(f"{video_input}null[vout]")
+    if settings.audio_mode == "replace" and len(settings.replacement_audio_clips) > 1:
+        parts.append(_build_audio_mix_filter(len(settings.replacement_audio_clips)))
     return ";".join(parts)
 
 

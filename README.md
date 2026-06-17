@@ -1,7 +1,21 @@
 # Cutie
 
-Cutie is a small Linux-only GTK4/libadwaita app for basic FFmpeg video editing,
-audio replacement, and format conversion.
+Cutie is a small Linux-only GTK4/libadwaita app for lightweight FFmpeg video
+editing, cropping, timeline edits, audio replacement, and format conversion.
+
+## Features
+
+- Video import with GTK preview and timeline playhead seeking.
+- Crop overlay with Apply and Decline. Apply generates a cropped temporary
+  working video, reloads the preview, and exports from that working source.
+- Timeline video and audio clips backed by project state, not pixel-only UI.
+- Split at playhead for video clips and linked original audio.
+- Movable and trimmable timeline clips with delete and mute actions.
+- Audio/music import from the Add Audio button or direct drag/drop onto the
+  timeline.
+- Export respects the working source, split video clips, timeline audio
+  position, mute state, output format, quality, and resolution settings.
+- Undo/redo snapshots for core crop and timeline operations.
 
 ## Requirements
 

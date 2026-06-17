@@ -65,7 +65,7 @@ class PreviewPlayer(Gtk.Box):
         self.apply_crop_button = Gtk.Button(label="Apply")
         self.apply_crop_button.connect("clicked", self._apply_crop)
         self.apply_crop_button.set_visible(False)
-        self.cancel_crop_button = Gtk.Button(label="Cancel")
+        self.cancel_crop_button = Gtk.Button(label="Decline")
         self.cancel_crop_button.connect("clicked", self._cancel_crop)
         self.cancel_crop_button.set_visible(False)
         self.aspect_combo = Gtk.ComboBoxText()
@@ -390,15 +390,25 @@ class PreviewPlayer(Gtk.Box):
         self._set_crop_approval_visible(self._crop_is_pending())
 
     def _apply_crop(self, _button: Gtk.Button) -> None:
+        enabled = self._crop_enabled
+        crop = self._crop.copy()
         self._applied_crop_enabled = self._crop_enabled
         self._applied_crop = self._crop.copy()
         self._set_crop_approval_visible(False)
         if self.on_crop_changed is not None:
-            self.on_crop_changed(self._crop_enabled, *self._crop)
+            self.on_crop_changed(enabled, *crop)
+        self._crop_enabled = False
+        self._crop = [0.0, 0.0, 1.0, 1.0]
+        self._applied_crop_enabled = False
+        self._applied_crop = self._crop.copy()
+        self.crop_toggle.set_active(False)
+        self.crop_area.queue_draw()
 
     def _cancel_crop(self, _button: Gtk.Button) -> None:
-        self._crop_enabled = self._applied_crop_enabled
-        self._crop = self._applied_crop.copy()
+        self._crop_enabled = False
+        self._crop = [0.0, 0.0, 1.0, 1.0]
+        self._applied_crop_enabled = False
+        self._applied_crop = self._crop.copy()
         self.crop_toggle.set_active(self._crop_enabled)
         self._set_crop_approval_visible(False)
         self.crop_area.queue_draw()

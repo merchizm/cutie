@@ -20,6 +20,9 @@ class TrimTimeline(Gtk.Box):
         self.on_seek: Callable[[float], None] | None = None
         self.on_trim_changed: Callable[[float, float], None] | None = None
         self.on_clip_selected: Callable[[str], None] | None = None
+        self.on_clip_moved: Callable[[str, float], None] | None = None
+        self.on_clip_trimmed: Callable[[str, str, float], None] | None = None
+        self.on_files_dropped: Callable[[list[Path], float, str], None] | None = None
 
         self._duration = 0.0
         self._position = 0.0
@@ -30,11 +33,13 @@ class TrimTimeline(Gtk.Box):
         self._audio_name: str | None = None
         self._has_original_audio = False
         self._video_segments: list[VideoSegment] = []
+        self._original_audio_clips: list[AudioClip] = []
         self._audio_clips: list[AudioClip] = []
         self._selected_clip_id: str | None = "video"
         self._zoom = 1.0
         self._drag_mode: str | None = None
         self._drag_start_x = 0.0
+        self._drag_clip_id: str | None = None
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         title = Gtk.Label(label="Timeline")
@@ -76,16 +81,29 @@ class TrimTimeline(Gtk.Box):
         drag.connect("drag-end", self._drag_end)
         self.area.add_controller(drag)
 
+        try:
+            drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+            drop.connect("drop", self._files_dropped)
+            self.area.add_controller(drop)
+        except AttributeError:
+            pass
+
         self.append(header)
         self.append(self.area)
-        self.set_sensitive(False)
+        self.set_sensitive(True)
 
     def set_duration(self, duration: float) -> None:
         self._duration = max(duration, 0.0)
         self._position = 0.0
         self._trim_start = 0.0
         self._trim_end = self._duration
-        self.set_sensitive(self._duration > 0)
+        self.set_sensitive(True)
+        self.area.queue_draw()
+
+    def update_duration(self, duration: float) -> None:
+        self._duration = max(duration, 0.0)
+        self._position = clamp_time(self._position, 0, self._duration)
+        self._trim_end = max(self._trim_end, self._duration)
         self.area.queue_draw()
 
     def set_video_name(self, name: str) -> None:
@@ -111,6 +129,10 @@ class TrimTimeline(Gtk.Box):
     def set_audio_clips(self, clips: list[AudioClip], selected_clip_id: str | None) -> None:
         self._audio_clips = list(clips)
         self._selected_clip_id = selected_clip_id
+        self.area.queue_draw()
+
+    def set_original_audio_clips(self, clips: list[AudioClip]) -> None:
+        self._original_audio_clips = list(clips)
         self.area.queue_draw()
 
     def set_video_segments(self, segments: list[VideoSegment]) -> None:
@@ -169,8 +191,9 @@ class TrimTimeline(Gtk.Box):
             return
 
         tick_step = self._tick_step()
+        visible_duration = self._visible_duration()
         tick = 0.0
-        while tick <= self._duration + 0.01:
+        while tick <= visible_duration + 0.01:
             x = self._time_to_x(tick, left, timeline_w)
             cr.set_source_rgba(muted[0], muted[1], muted[2], 0.4)
             cr.move_to(x, ruler_y + 4)
@@ -184,8 +207,7 @@ class TrimTimeline(Gtk.Box):
 
         trim_x = self._time_to_x(self._trim_start, left, timeline_w)
         trim_w = max(self._time_to_x(self._trim_end, left, timeline_w) - trim_x, 8)
-        segments = self._video_segments or [VideoSegment(self._trim_start, self._trim_end, "video")]
-        for index, segment in enumerate(segments):
+        for index, segment in enumerate(self._video_segments):
             segment_start = max(segment.start, self._trim_start)
             segment_end = min(segment.end, self._trim_end)
             if segment_end <= segment_start:
@@ -201,34 +223,37 @@ class TrimTimeline(Gtk.Box):
                 track_h,
                 accent,
                 label,
-                self._selected_clip_id == "video",
+                self._selected_clip_id == segment.id,
             )
-        self._draw_trim_handle(cr, trim_x, video_y, track_h)
-        self._draw_trim_handle(cr, trim_x + trim_w, video_y, track_h)
+            self._draw_trim_handle(cr, segment_x, video_y, track_h)
+            self._draw_trim_handle(cr, segment_x + segment_w, video_y, track_h)
 
         audio_color = (0.12, 0.58, 0.44, 1.0)
         original_audio_h = 18
         music_y = audio_y + 22
-        if self._audio_mode == "mute" or not self._has_original_audio:
+        if self._audio_mode == "mute" or not self._has_original_audio or not self._original_audio_clips:
             original_label = "Original audio muted" if self._has_original_audio else "No original audio"
             self._draw_muted_audio(cr, left, audio_y, timeline_w, original_audio_h, muted, original_label)
         else:
-            self._draw_audio_clip(
-                cr,
-                trim_x,
-                audio_y,
-                trim_w,
-                original_audio_h,
-                audio_color,
-                "Original audio",
-                False,
-            )
+            for clip in self._original_audio_clips:
+                clip_x = self._time_to_x(clip.timeline_start, left, timeline_w)
+                clip_w = max(self._time_to_x(clip.timeline_end, left, timeline_w) - clip_x, 6)
+                color = audio_color if not clip.muted else (0.5, 0.5, 0.55, 1.0)
+                self._draw_audio_clip(
+                    cr,
+                    clip_x,
+                    audio_y,
+                    min(clip_w, left + timeline_w - clip_x),
+                    original_audio_h,
+                    color,
+                    clip.label,
+                    self._selected_clip_id == clip.id,
+                )
 
         if self._audio_clips:
             for clip in self._audio_clips:
                 clip_x = self._time_to_x(clip.timeline_start, left, timeline_w)
-                clip_end = min(clip.timeline_start + max(clip.duration, self._trim_end - self._trim_start), self._duration)
-                clip_w = max(self._time_to_x(clip_end, left, timeline_w) - clip_x, 32)
+                clip_w = max(self._time_to_x(clip.timeline_end, left, timeline_w) - clip_x, 32)
                 color = (0.38, 0.32, 0.82, 1.0) if not clip.muted else (0.5, 0.5, 0.55, 1.0)
                 label = f"{clip.filename}  {seconds_to_label(clip.duration)}"
                 if clip.muted:
@@ -243,6 +268,8 @@ class TrimTimeline(Gtk.Box):
                     label,
                     self._selected_clip_id == clip.id,
                 )
+                self._draw_trim_handle(cr, clip_x, music_y, 18)
+                self._draw_trim_handle(cr, min(clip_x + clip_w, left + timeline_w), music_y, 18)
         elif self._audio_mode == "replace" and self._audio_name:
             self._draw_audio_clip(cr, trim_x, music_y, trim_w, 18, audio_color, self._audio_name, False)
 
@@ -371,24 +398,40 @@ class TrimTimeline(Gtk.Box):
 
     def _click_pressed(self, _gesture: Gtk.GestureClick, _n_press: int, x: float, y: float) -> None:
         mode = self._hit_test(x, y)
-        if mode in ("left-handle", "right-handle", "playhead"):
+        if mode == "playhead":
             self._drag_mode = mode
-        elif mode == "video":
-            self._select_clip("video")
-        elif mode and mode.startswith("audio:"):
-            self._select_clip(mode.removeprefix("audio:"))
+        elif mode and mode.startswith("clip:"):
+            self._select_clip(mode.removeprefix("clip:"))
+        elif mode and (mode.startswith("left:") or mode.startswith("right:")):
+            side, clip_id = mode.split(":", 1)
+            self._drag_mode = side
+            self._drag_clip_id = clip_id
+            self._select_clip(clip_id)
         else:
             self._seek_from_x(x)
 
     def _drag_begin(self, _gesture: Gtk.GestureDrag, x: float, y: float) -> None:
         self._drag_start_x = x
-        self._drag_mode = self._hit_test(x, y) or "playhead"
+        mode = self._hit_test(x, y)
+        if mode and mode.startswith("clip:"):
+            self._drag_mode = "move-clip"
+            self._drag_clip_id = mode.removeprefix("clip:")
+            self._select_clip(self._drag_clip_id)
+        elif mode and (mode.startswith("left:") or mode.startswith("right:")):
+            side, clip_id = mode.split(":", 1)
+            self._drag_mode = side
+            self._drag_clip_id = clip_id
+            self._select_clip(clip_id)
+        else:
+            self._drag_mode = mode or "playhead"
+            self._drag_clip_id = None
 
     def _drag_update(self, _gesture: Gtk.GestureDrag, offset_x: float, _offset_y: float) -> None:
         self._apply_drag(self._drag_start_x + offset_x)
 
     def _drag_end(self, _gesture: Gtk.GestureDrag, _offset_x: float, _offset_y: float) -> None:
         self._drag_mode = None
+        self._drag_clip_id = None
 
     def _apply_drag(self, x: float) -> None:
         seconds = self._x_to_time(x)
@@ -400,6 +443,16 @@ class TrimTimeline(Gtk.Box):
             self._trim_end = clamp_time(seconds, min(self._trim_start + 0.1, self._duration), self._duration)
             self._position = min(self._position, self._trim_end)
             self._emit_trim()
+        elif self._drag_mode == "move-clip" and self._drag_clip_id is not None:
+            start_time = self._x_to_time(self._drag_start_x)
+            delta = seconds - start_time
+            current_start = self._clip_start(self._drag_clip_id)
+            if current_start is not None and self.on_clip_moved is not None:
+                self.on_clip_moved(self._drag_clip_id, max(current_start + delta, 0.0))
+                self._drag_start_x = x
+        elif self._drag_mode in ("left", "right") and self._drag_clip_id is not None:
+            if self.on_clip_trimmed is not None:
+                self.on_clip_trimmed(self._drag_clip_id, self._drag_mode, seconds)
         else:
             self._seek(seconds)
         self.area.queue_draw()
@@ -409,28 +462,33 @@ class TrimTimeline(Gtk.Box):
         video_y = 48
         audio_y = 108
         track_h = 40
-        trim_start_x = self._time_to_x(self._trim_start, left, timeline_w)
-        trim_end_x = self._time_to_x(self._trim_end, left, timeline_w)
         playhead_x = self._time_to_x(self._position, left, timeline_w)
         if video_y - 6 <= y <= video_y + track_h + 6:
-            if abs(x - trim_start_x) <= 10:
-                return "left-handle"
-            if abs(x - trim_end_x) <= 10:
-                return "right-handle"
-            segments = self._video_segments or [VideoSegment(self._trim_start, self._trim_end, "video")]
-            for segment in segments:
+            for segment in self._video_segments:
                 segment_start = max(segment.start, self._trim_start)
                 segment_end = min(segment.end, self._trim_end)
                 segment_start_x = self._time_to_x(segment_start, left, timeline_w)
                 segment_end_x = self._time_to_x(segment_end, left, timeline_w)
+                if abs(x - segment_start_x) <= 8:
+                    return f"left:{segment.id}"
+                if abs(x - segment_end_x) <= 8:
+                    return f"right:{segment.id}"
                 if segment_start_x <= x <= segment_end_x:
-                    return "video"
+                    return f"clip:{segment.id}"
+        for clip in self._original_audio_clips:
+            clip_x = self._time_to_x(clip.timeline_start, left, timeline_w)
+            clip_w = max(self._time_to_x(clip.timeline_end, left, timeline_w) - clip_x, 6)
+            if audio_y <= y <= audio_y + 20 and clip_x <= x <= clip_x + clip_w:
+                return f"clip:{clip.id}"
         for clip in self._audio_clips:
             clip_x = self._time_to_x(clip.timeline_start, left, timeline_w)
-            clip_end = min(clip.timeline_start + max(clip.duration, self._trim_end - self._trim_start), self._duration)
-            clip_w = max(self._time_to_x(clip_end, left, timeline_w) - clip_x, 32)
+            clip_w = max(self._time_to_x(clip.timeline_end, left, timeline_w) - clip_x, 32)
             if audio_y + 22 <= y <= audio_y + 42 and clip_x <= x <= clip_x + clip_w:
-                return f"audio:{clip.id}"
+                if abs(x - clip_x) <= 8:
+                    return f"left:{clip.id}"
+                if abs(x - (clip_x + clip_w)) <= 8:
+                    return f"right:{clip.id}"
+                return f"clip:{clip.id}"
         if 12 <= y <= audio_y + track_h + 16 and abs(x - playhead_x) <= 10:
             return "playhead"
         if 12 <= y <= audio_y + track_h + 16:
@@ -450,21 +508,41 @@ class TrimTimeline(Gtk.Box):
         if self.on_trim_changed is not None:
             self.on_trim_changed(self._trim_start, self._trim_end)
 
+    def _clip_start(self, clip_id: str) -> float | None:
+        for clip in [*self._video_segments, *self._original_audio_clips, *self._audio_clips]:
+            if clip.id == clip_id:
+                return clip.timeline_start
+        return None
+
     def _select_clip(self, clip_id: str) -> None:
         self._selected_clip_id = clip_id
         self.area.queue_draw()
         if self.on_clip_selected is not None:
             self.on_clip_selected(clip_id)
 
+    def _files_dropped(self, _target: Gtk.DropTarget, value: object, x: float, y: float) -> bool:
+        if self.on_files_dropped is None:
+            return False
+        try:
+            files = value.get_files()
+        except AttributeError:
+            return False
+        paths = [Path(file.get_path()) for file in files if file.get_path()]
+        if not paths:
+            return False
+        track_type = "audio" if y >= 96 else "video"
+        self.on_files_dropped(paths, self._x_to_time(x), track_type)
+        return True
+
     def _time_to_x(self, seconds: float, left: float, timeline_w: float) -> float:
         if self._duration <= 0:
             return left
-        return left + (seconds / self._duration) * timeline_w
+        return left + (seconds / self._visible_duration()) * timeline_w
 
     def _x_to_time(self, x: float) -> float:
         left, timeline_w = self._geometry()
         fraction = (x - left) / timeline_w
-        return clamp_time(fraction * self._duration, 0, self._duration)
+        return clamp_time(fraction * self._visible_duration(), 0, self._duration)
 
     def _geometry(self) -> tuple[int, int]:
         width = max(self.area.get_width(), 1)
@@ -473,15 +551,19 @@ class TrimTimeline(Gtk.Box):
         return left, max(width - left - right, 1)
 
     def _tick_step(self) -> float:
-        if self._duration <= 12:
+        visible_duration = self._visible_duration()
+        if visible_duration <= 12:
             base = 1
-        elif self._duration <= 60:
+        elif visible_duration <= 60:
             base = 5
-        elif self._duration <= 300:
+        elif visible_duration <= 300:
             base = 30
         else:
             base = 60
-        return max(base / self._zoom, 0.5)
+        return max(base, 0.5)
+
+    def _visible_duration(self) -> float:
+        return max(self._duration / self._zoom, 0.001)
 
     def _zoom_in(self, _button: Gtk.Button) -> None:
         self.zoom_in()
