@@ -1,11 +1,13 @@
 from pathlib import Path
 
+from app.core.crop_worker import CropWorker
 from app.core.ffmpeg_command_builder import (
     ExportSettings,
     build_ffmpeg_command,
     export_settings_from_project,
 )
 from app.core.project_state import ProjectState
+from app.utils.numbers import even_floor
 from app.utils.timecode import seconds_to_label, seconds_to_timecode
 
 
@@ -55,6 +57,44 @@ def test_replace_audio_command() -> None:
     assert "music.mp3" in command
     assert "-shortest" in command
     assert "libopus" in command
+
+
+def test_trim_only_same_container_uses_stream_copy() -> None:
+    command = build_ffmpeg_command(
+        ExportSettings(
+            input_path=Path("input.mp4"),
+            output_path=Path("output.mp4"),
+            trim_start=1,
+            trim_end=4,
+            audio_mode="keep",
+            format_name="mp4",
+        )
+    )
+
+    assert "-ss" in command
+    assert "-to" in command
+    assert command[command.index("-c") + 1] == "copy"
+    assert "libx264" not in command
+    assert "-progress" in command
+
+
+def test_trim_with_resize_reencodes_instead_of_stream_copy() -> None:
+    command = build_ffmpeg_command(
+        ExportSettings(
+            input_path=Path("input.mp4"),
+            output_path=Path("output.mp4"),
+            trim_start=1,
+            trim_end=4,
+            output_width=1280,
+            output_height=720,
+            audio_mode="keep",
+            format_name="mp4",
+        )
+    )
+
+    assert "scale=1280:720" in command
+    assert "libx264" in command
+    assert "-c" not in command
 
 
 def test_project_state_crop_and_timeline_audio_export() -> None:
@@ -327,3 +367,19 @@ def test_export_dialog_resolution_math() -> None:
     assert resolve_output_size("1080p", "9:16", 1280, 720) == (1080, 1920)
     assert resolve_output_size("1080 square", "1:1", 1280, 720) == (1080, 1080)
     assert resolve_output_size("1280 width", "16:9", 1280, 720) == (1280, 720)
+
+
+def test_even_floor_clamps_and_rounds_to_lower_even() -> None:
+    assert even_floor(-3) == 0
+    assert even_floor(853) == 852
+    assert even_floor(854) == 854
+
+
+def test_crop_worker_cleanup_removes_owned_temp_file() -> None:
+    worker = CropWorker(Path("input.mp4"), (0, 0, 100, 100), 1, lambda *_args: None)
+    worker.output_path.parent.mkdir(parents=True, exist_ok=True)
+    worker.output_path.write_text("temporary crop", encoding="utf-8")
+
+    worker.cleanup()
+
+    assert not worker.output_path.exists()

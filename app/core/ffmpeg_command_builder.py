@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.project_state import ProjectState
+from app.utils.numbers import even_floor
 from app.utils.timecode import seconds_to_timecode
 
 
@@ -73,6 +74,11 @@ def build_ffmpeg_command(settings: ExportSettings) -> list[str]:
         video_filter = _build_video_filter(settings)
         if video_filter:
             command.extend(["-vf", video_filter])
+
+    if _can_stream_copy(settings, has_segments, video_filter):
+        command.extend(_format_stream_copy_args(settings.audio_mode))
+        command.extend(["-progress", "pipe:1", str(settings.output_path)])
+        return command
 
     if has_segments:
         command.extend(["-map", "[vout]"])
@@ -186,6 +192,24 @@ def _format_audio_args(format_name: str, replacement: bool) -> list[str]:
     return ["-c:a", "aac", "-b:a", bitrate]
 
 
+def _format_stream_copy_args(audio_mode: str) -> list[str]:
+    if audio_mode == "mute":
+        return ["-c:v", "copy", "-an"]
+    return ["-c", "copy"]
+
+
+def _can_stream_copy(settings: ExportSettings, has_segments: bool, video_filter: str | None) -> bool:
+    if has_segments or video_filter:
+        return False
+    if settings.audio_mode not in {"keep", "mute"}:
+        return False
+    if settings.replacement_audio_path is not None or settings.replacement_audio_clips:
+        return False
+    if settings.format_name == "mkv":
+        return True
+    return settings.input_path.suffix.lower().lstrip(".") == settings.format_name
+
+
 def _build_audio_mix_filter(input_count: int) -> str:
     labels = "".join(f"[{index}:a:0]" for index in range(1, input_count + 1))
     return f"{labels}amix=inputs={input_count}:duration=longest:dropout_transition=0[mixout]"
@@ -287,15 +311,10 @@ def _build_segment_filter(settings: ExportSettings) -> str:
 def _source_crop_pixels(state: ProjectState) -> tuple[int, int, int, int] | None:
     if not state.crop_enabled or state.source_width <= 0 or state.source_height <= 0:
         return None
-    x = _even(int(round(state.crop_x * state.source_width)))
-    y = _even(int(round(state.crop_y * state.source_height)))
-    width = _even(int(round(state.crop_width * state.source_width)))
-    height = _even(int(round(state.crop_height * state.source_height)))
+    x = even_floor(int(round(state.crop_x * state.source_width)))
+    y = even_floor(int(round(state.crop_y * state.source_height)))
+    width = even_floor(int(round(state.crop_width * state.source_width)))
+    height = even_floor(int(round(state.crop_height * state.source_height)))
     width = max(2, min(width, state.source_width - x))
     height = max(2, min(height, state.source_height - y))
     return x, y, width, height
-
-
-def _even(value: int) -> int:
-    value = max(value, 0)
-    return value if value % 2 == 0 else value - 1

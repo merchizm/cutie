@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 from pathlib import Path
 
 import gi
@@ -15,12 +16,17 @@ from app.core.ffmpeg_command_builder import export_settings_from_project
 from app.core.ffprobe_reader import FFprobeError, read_media_duration, read_media_info
 from app.core.media_info import MediaInfo
 from app.core.project_state import AudioClip, CropRecord, ProjectState
+from app.utils.numbers import even_floor
 from app.utils.paths import default_output_path, open_folder
 from app.utils.timecode import seconds_to_label
 from app.widgets.export_dialog import DialogExportOptions, ExportSettingsDialog
 from app.widgets.playback_controls import PlaybackControls
 from app.widgets.preview_player import PreviewPlayer
 from app.widgets.trim_timeline import TrimTimeline
+
+
+logger = logging.getLogger(__name__)
+UNDO_LIMIT = 50
 
 
 class CutieWindow(Adw.ApplicationWindow):
@@ -33,6 +39,7 @@ class CutieWindow(Adw.ApplicationWindow):
         self.worker: ExportWorker | None = None
         self.crop_worker: CropWorker | None = None
         self.last_output_path: Path | None = None
+        self.owned_temp_files: set[Path] = set()
         self.undo_stack: list[ProjectState] = []
         self.redo_stack: list[ProjectState] = []
 
@@ -106,6 +113,7 @@ class CutieWindow(Adw.ApplicationWindow):
         self._install_drop_target()
         self._install_shortcuts()
         self._set_empty_metadata()
+        self.connect("close-request", self._close_request)
 
     def _build_header(self) -> Adw.HeaderBar:
         header = Adw.HeaderBar()
@@ -142,8 +150,6 @@ class CutieWindow(Adw.ApplicationWindow):
         self.split_button.connect("clicked", self._split_at_playhead)
         self.delete_button = self._tool_button("edit-delete-symbolic", "Delete selected clip")
         self.delete_button.connect("clicked", self._delete_selected_clip)
-        self.mute_button = self._tool_button("audio-volume-muted-symbolic", "Mute selected")
-        self.mute_button.connect("clicked", self._mute_selected_clip)
         self.original_audio_button = self._tool_button("audio-speakers-symbolic", "Toggle original audio")
         self.original_audio_button.connect("clicked", self._toggle_original_audio)
         self.zoom_out_button = self._tool_button("zoom-out-symbolic", "Zoom out timeline")
@@ -162,7 +168,6 @@ class CutieWindow(Adw.ApplicationWindow):
             self.add_audio_button,
             self.split_button,
             self.delete_button,
-            self.mute_button,
             self.original_audio_button,
             self.undo_button,
             self.redo_button,
@@ -449,21 +454,17 @@ class CutieWindow(Adw.ApplicationWindow):
         self.state.crop_height = height
         self.progress.set_fraction(0)
         self.progress.set_text("Cropping")
+        source_path = self.state.working_video_path
+
+        def on_crop_done(success: bool, path: Path | None, message: str) -> None:
+            self._crop_done(success, path, message, source_path, x, y, width, height)
+
         self.crop_worker = CropWorker(
-            self.state.working_video_path,
+            source_path,
             crop,
             self.state.working_duration,
-            lambda success, path, message: GLib.idle_add(
-                self._crop_done,
-                success,
-                path,
-                message,
-                self.state.working_video_path,
-                x,
-                y,
-                width,
-                height,
-            ),
+            on_crop_done,
+            dispatch_done=lambda callback, success, path, message: GLib.idle_add(callback, success, path, message),
         )
         self.crop_worker.start()
 
@@ -483,9 +484,11 @@ class CutieWindow(Adw.ApplicationWindow):
             self._discard_empty_undo()
             self._toast(message)
             return False
+        self.owned_temp_files.add(path)
         try:
             info = read_media_info(path)
         except FFprobeError as exc:
+            logger.exception("Failed to inspect cropped video: %s", path)
             self._toast(str(exc))
             return False
         self.media_info = info
@@ -610,6 +613,8 @@ class CutieWindow(Adw.ApplicationWindow):
 
     def _push_undo(self) -> None:
         self.undo_stack.append(copy.deepcopy(self.state))
+        if len(self.undo_stack) > UNDO_LIMIT:
+            self.undo_stack.pop(0)
         self.redo_stack.clear()
 
     def _discard_empty_undo(self) -> None:
@@ -630,6 +635,8 @@ class CutieWindow(Adw.ApplicationWindow):
             self._toast("Nothing to redo.")
             return
         self.undo_stack.append(copy.deepcopy(self.state))
+        if len(self.undo_stack) > UNDO_LIMIT:
+            self.undo_stack.pop(0)
         self.state = self.redo_stack.pop()
         self._restore_state_to_ui()
         self._toast("Redo.")
@@ -660,10 +667,10 @@ class CutieWindow(Adw.ApplicationWindow):
     ) -> tuple[int, int, int, int] | None:
         if self.state.working_width <= 0 or self.state.working_height <= 0:
             return None
-        pixel_x = _even(int(round(x * self.state.working_width)))
-        pixel_y = _even(int(round(y * self.state.working_height)))
-        pixel_width = _even(int(round(width * self.state.working_width)))
-        pixel_height = _even(int(round(height * self.state.working_height)))
+        pixel_x = even_floor(int(round(x * self.state.working_width)))
+        pixel_y = even_floor(int(round(y * self.state.working_height)))
+        pixel_width = even_floor(int(round(width * self.state.working_width)))
+        pixel_height = even_floor(int(round(height * self.state.working_height)))
         pixel_width = max(2, min(pixel_width, self.state.working_width - pixel_x))
         pixel_height = max(2, min(pixel_height, self.state.working_height - pixel_y))
         return pixel_x, pixel_y, pixel_width, pixel_height
@@ -691,6 +698,23 @@ class CutieWindow(Adw.ApplicationWindow):
     def _toast(self, message: str) -> None:
         self.toast_overlay.add_toast(Adw.Toast(title=message))
 
+    def _close_request(self, *_args: object) -> bool:
+        if self.worker is not None:
+            self.worker.cancel()
+        if self.crop_worker is not None:
+            self.crop_worker.cancel()
+        self._cleanup_temp_files()
+        return False
+
+    def _cleanup_temp_files(self) -> None:
+        for path in list(self.owned_temp_files):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.exception("Failed to remove temporary crop file: %s", path)
+            finally:
+                self.owned_temp_files.discard(path)
+
 
 class CutieApplication(Adw.Application):
     def __init__(self) -> None:
@@ -710,11 +734,6 @@ def _format_size(size_bytes: int) -> str:
             return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
         value /= 1024
     return f"{size_bytes} B"
-
-
-def _even(value: int) -> int:
-    value = max(value, 0)
-    return value if value % 2 == 0 else value - 1
 
 
 def main() -> int:

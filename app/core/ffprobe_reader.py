@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from fractions import Fraction
 from pathlib import Path
 
 from app.core.media_info import MediaInfo
+
+logger = logging.getLogger(__name__)
+FFPROBE_TIMEOUT_SECONDS = 30
 
 
 class FFprobeError(RuntimeError):
@@ -38,12 +42,18 @@ def read_media_info(path: Path) -> MediaInfo:
             check=True,
             capture_output=True,
             text=True,
+            timeout=FFPROBE_TIMEOUT_SECONDS,
         )
     except FileNotFoundError as exc:
+        logger.exception("ffprobe executable was not found")
         raise FFprobeError("ffprobe was not found. Install FFmpeg to use Cutie.") from exc
     except subprocess.CalledProcessError as exc:
         details = exc.stderr.strip() or "ffprobe could not read this file."
+        logger.warning("ffprobe failed for %s: %s", path, details)
         raise FFprobeError(details) from exc
+    except subprocess.TimeoutExpired as exc:
+        logger.warning("ffprobe timed out for %s", path)
+        raise FFprobeError("ffprobe timed out while reading this file.") from exc
 
     try:
         payload = json.loads(result.stdout)
@@ -81,10 +91,21 @@ def read_media_duration(path: Path) -> float:
         str(path),
     ]
     try:
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        result = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=FFPROBE_TIMEOUT_SECONDS,
+        )
         payload = json.loads(result.stdout)
         return float(payload.get("format", {}).get("duration") or 0.0)
     except FileNotFoundError as exc:
+        logger.exception("ffprobe executable was not found")
         raise FFprobeError("ffprobe was not found. Install FFmpeg to use Cutie.") from exc
+    except subprocess.TimeoutExpired as exc:
+        logger.warning("ffprobe duration read timed out for %s", path)
+        raise FFprobeError("ffprobe timed out while reading media duration.") from exc
     except (subprocess.CalledProcessError, json.JSONDecodeError, ValueError) as exc:
+        logger.warning("Could not read media duration for %s", path)
         raise FFprobeError("Could not read media duration.") from exc

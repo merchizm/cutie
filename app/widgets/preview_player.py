@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from cairo import Context as CairoContext
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -169,7 +170,7 @@ class PreviewPlayer(Gtk.Box):
         self._set_crop_approval_visible(False)
         self.crop_area.queue_draw()
 
-    def _draw_crop_overlay(self, _area: Gtk.DrawingArea, cr: object, width: int, height: int) -> None:
+    def _draw_crop_overlay(self, _area: Gtk.DrawingArea, cr: CairoContext, width: int, height: int) -> None:
         if not self._crop_enabled:
             return
         x, y, crop_w, crop_h = self._crop_rect_pixels(width, height)

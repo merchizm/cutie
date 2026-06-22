@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
+from cairo import Context as CairoContext
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -10,6 +11,17 @@ from gi.repository import Gdk, Gtk
 
 from app.core.project_state import AudioClip, VideoSegment
 from app.utils.timecode import clamp_time, seconds_to_label
+
+
+class TimelineLayout:
+    LEFT_MARGIN = 88
+    RIGHT_MARGIN = 18
+    RULER_Y = 20
+    VIDEO_Y = 48
+    AUDIO_Y = 108
+    TRACK_HEIGHT = 40
+    ORIGINAL_AUDIO_HEIGHT = 18
+    MUSIC_TRACK_OFFSET = 22
 
 
 class TrimTimeline(Gtk.Box):
@@ -158,13 +170,13 @@ class TrimTimeline(Gtk.Box):
     def get_trim(self) -> tuple[float, float]:
         return self._trim_start, self._trim_end
 
-    def _draw(self, _area: Gtk.DrawingArea, cr: object, width: int, height: int) -> None:
-        left = 88
-        right = 18
-        ruler_y = 20
-        video_y = 48
-        audio_y = 108
-        track_h = 40
+    def _draw(self, _area: Gtk.DrawingArea, cr: CairoContext, width: int, height: int) -> None:
+        left = TimelineLayout.LEFT_MARGIN
+        right = TimelineLayout.RIGHT_MARGIN
+        ruler_y = TimelineLayout.RULER_Y
+        video_y = TimelineLayout.VIDEO_Y
+        audio_y = TimelineLayout.AUDIO_Y
+        track_h = TimelineLayout.TRACK_HEIGHT
         timeline_w = max(width - left - right, 1)
 
         bg = _rgba("window_bg_color", (0.11, 0.11, 0.12, 1.0))
@@ -229,8 +241,8 @@ class TrimTimeline(Gtk.Box):
             self._draw_trim_handle(cr, segment_x + segment_w, video_y, track_h)
 
         audio_color = (0.12, 0.58, 0.44, 1.0)
-        original_audio_h = 18
-        music_y = audio_y + 22
+        original_audio_h = TimelineLayout.ORIGINAL_AUDIO_HEIGHT
+        music_y = audio_y + TimelineLayout.MUSIC_TRACK_OFFSET
         if self._audio_mode == "mute" or not self._has_original_audio or not self._original_audio_clips:
             original_label = "Original audio muted" if self._has_original_audio else "No original audio"
             self._draw_muted_audio(cr, left, audio_y, timeline_w, original_audio_h, muted, original_label)
@@ -282,14 +294,14 @@ class TrimTimeline(Gtk.Box):
         cr.arc(playhead_x, ruler_y + 1, 5, 0, 6.283)
         cr.fill()
 
-    def _draw_track_backplate(self, cr: object, x: float, y: float, width: float, height: float) -> None:
+    def _draw_track_backplate(self, cr: CairoContext, x: float, y: float, width: float, height: float) -> None:
         _rounded_rect(cr, x, y, width, height, 7)
         cr.set_source_rgba(1, 1, 1, 0.07)
         cr.fill()
 
     def _draw_clip(
         self,
-        cr: object,
+        cr: CairoContext,
         x: float,
         y: float,
         width: float,
@@ -309,7 +321,7 @@ class TrimTimeline(Gtk.Box):
 
     def _draw_audio_clip(
         self,
-        cr: object,
+        cr: CairoContext,
         x: float,
         y: float,
         width: float,
@@ -329,7 +341,7 @@ class TrimTimeline(Gtk.Box):
 
     def _draw_muted_audio(
         self,
-        cr: object,
+        cr: CairoContext,
         x: float,
         y: float,
         width: float,
@@ -342,7 +354,7 @@ class TrimTimeline(Gtk.Box):
         cr.fill()
         self._draw_label(cr, label, x + 14, y + 25, muted, 12)
 
-    def _draw_trim_handle(self, cr: object, x: float, y: float, height: float) -> None:
+    def _draw_trim_handle(self, cr: CairoContext, x: float, y: float, height: float) -> None:
         _rounded_rect(cr, x - 5, y + 2, 10, height - 4, 4)
         cr.set_source_rgba(1, 1, 1, 0.95)
         cr.fill()
@@ -354,7 +366,7 @@ class TrimTimeline(Gtk.Box):
         cr.line_to(x + 1.5, y + height - 12)
         cr.stroke()
 
-    def _draw_thumbnail_stripes(self, cr: object, x: float, y: float, width: float, height: float) -> None:
+    def _draw_thumbnail_stripes(self, cr: CairoContext, x: float, y: float, width: float, height: float) -> None:
         if width <= 0:
             return
         step = 34
@@ -365,7 +377,7 @@ class TrimTimeline(Gtk.Box):
             cr.fill()
             current += step
 
-    def _draw_waveform(self, cr: object, x: float, y: float, width: float, height: float) -> None:
+    def _draw_waveform(self, cr: CairoContext, x: float, y: float, width: float, height: float) -> None:
         if width <= 0:
             return
         cr.set_source_rgba(1, 1, 1, 0.42)
@@ -383,7 +395,7 @@ class TrimTimeline(Gtk.Box):
 
     def _draw_label(
         self,
-        cr: object,
+        cr: CairoContext,
         text: str,
         x: float,
         y: float,
@@ -459,9 +471,9 @@ class TrimTimeline(Gtk.Box):
 
     def _hit_test(self, x: float, y: float) -> str | None:
         left, timeline_w = self._geometry()
-        video_y = 48
-        audio_y = 108
-        track_h = 40
+        video_y = TimelineLayout.VIDEO_Y
+        audio_y = TimelineLayout.AUDIO_Y
+        track_h = TimelineLayout.TRACK_HEIGHT
         playhead_x = self._time_to_x(self._position, left, timeline_w)
         if video_y - 6 <= y <= video_y + track_h + 6:
             for segment in self._video_segments:
@@ -546,8 +558,8 @@ class TrimTimeline(Gtk.Box):
 
     def _geometry(self) -> tuple[int, int]:
         width = max(self.area.get_width(), 1)
-        left = 88
-        right = 18
+        left = TimelineLayout.LEFT_MARGIN
+        right = TimelineLayout.RIGHT_MARGIN
         return left, max(width - left - right, 1)
 
     def _tick_step(self) -> float:
@@ -575,7 +587,7 @@ class TrimTimeline(Gtk.Box):
         self.fit()
 
 
-def _rounded_rect(cr: object, x: float, y: float, width: float, height: float, radius: float) -> None:
+def _rounded_rect(cr: CairoContext, x: float, y: float, width: float, height: float, radius: float) -> None:
     radius = min(radius, width / 2, height / 2)
     cr.new_sub_path()
     cr.arc(x + width - radius, y + radius, radius, -1.5708, 0)
