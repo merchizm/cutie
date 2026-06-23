@@ -10,6 +10,8 @@ gi.require_version("Adw", "1")
 gi.require_version("Gtk", "4.0")
 from gi.repository import Adw, Gtk
 
+from app.core.ffmpeg_capabilities import available_h264_encoder_options
+
 
 @dataclass(frozen=True)
 class DialogExportOptions:
@@ -20,6 +22,9 @@ class DialogExportOptions:
     output_height: int | None
     aspect_mode: str
     video_crf: int
+    video_encoder: str
+    video_preset: str
+    target_video_bitrate_kbps: int | None
     audio_mode: str
     loop_timeline_audio: bool
 
@@ -44,6 +49,7 @@ class ExportSettingsDialog(Gtk.Window):
         "Small file": 28,
         "Custom CRF": -1,
     }
+    PRESETS = ("ultrafast", "veryfast", "fast", "medium", "slow")
 
     def __init__(
         self,
@@ -79,6 +85,9 @@ class ExportSettingsDialog(Gtk.Window):
         self.aspect_combo = self._combo(list(self.ASPECTS), "Original")
         self.quality_combo = self._combo(list(self.QUALITY), "Balanced")
         self.quality_combo.connect("changed", self._quality_changed)
+        self.encoder_options = available_h264_encoder_options()
+        self.encoder_combo = self._combo(list(self.encoder_options), "CPU H.264")
+        self.preset_combo = self._combo(list(self.PRESETS), "medium")
 
         self.custom_width = Gtk.SpinButton.new_with_range(2, 7680, 2)
         self.custom_width.set_value(1280)
@@ -87,6 +96,12 @@ class ExportSettingsDialog(Gtk.Window):
         self.custom_crf = Gtk.SpinButton.new_with_range(0, 51, 1)
         self.custom_crf.set_value(23)
         self.custom_crf.set_sensitive(False)
+        self.target_bitrate_switch = Gtk.Switch()
+        self.target_bitrate_switch.set_active(False)
+        self.target_bitrate_switch.connect("notify::active", self._target_bitrate_changed)
+        self.target_bitrate = Gtk.SpinButton.new_with_range(256, 100_000, 256)
+        self.target_bitrate.set_value(6000)
+        self.target_bitrate.set_sensitive(False)
 
         self.audio_combo = Gtk.ComboBoxText()
         self.audio_combo.append("keep", "Keep original")
@@ -105,13 +120,16 @@ class ExportSettingsDialog(Gtk.Window):
         group = Adw.PreferencesGroup()
         group.add(self._row("Output file", output_button))
         group.add(self._row("Format", self.format_combo))
-        group.add(self._row("Codec", Gtk.Label(label="H.264 / VP9", xalign=1)))
+        group.add(self._row("Encoder", self.encoder_combo))
+        group.add(self._row("Preset", self.preset_combo))
         group.add(self._row("Resolution", self.resolution_combo))
         group.add(self._row("Aspect", self.aspect_combo))
         group.add(self._row("Custom width", self.custom_width))
         group.add(self._row("Custom height", self.custom_height))
         group.add(self._row("Quality", self.quality_combo))
         group.add(self._row("Custom CRF", self.custom_crf))
+        group.add(self._row("Target bitrate", self.target_bitrate_switch))
+        group.add(self._row("Bitrate kbps", self.target_bitrate))
         group.add(self._row("Audio", self.audio_combo))
         group.add(self._row("Loop timeline audio", self.loop_audio))
 
@@ -169,12 +187,16 @@ class ExportSettingsDialog(Gtk.Window):
     def _quality_changed(self, _combo: Gtk.ComboBoxText) -> None:
         self.custom_crf.set_sensitive(self.quality_combo.get_active_text() == "Custom CRF")
 
+    def _target_bitrate_changed(self, _switch: Gtk.Switch, _pspec: object) -> None:
+        self.target_bitrate.set_sensitive(self.target_bitrate_switch.get_active())
+
     def _export(self, _button: Gtk.Button) -> None:
         format_label = self.format_combo.get_active_text() or "MP4"
         format_name, extension = self.FORMATS[format_label]
         width, height = self._resolve_output_size()
         quality_label = self.quality_combo.get_active_text() or "Balanced"
         crf = int(self.custom_crf.get_value()) if quality_label == "Custom CRF" else self.QUALITY[quality_label]
+        encoder_label = self.encoder_combo.get_active_text() or "CPU H.264"
         self._on_export(
             DialogExportOptions(
                 output_path=self._output_path,
@@ -184,6 +206,11 @@ class ExportSettingsDialog(Gtk.Window):
                 output_height=height,
                 aspect_mode=self.ASPECTS[self.aspect_combo.get_active_text() or "Original"],
                 video_crf=crf,
+                video_encoder=self.encoder_options.get(encoder_label, "libx264"),
+                video_preset=self.preset_combo.get_active_text() or "medium",
+                target_video_bitrate_kbps=(
+                    int(self.target_bitrate.get_value()) if self.target_bitrate_switch.get_active() else None
+                ),
                 audio_mode=self.audio_combo.get_active_id() or "keep",
                 loop_timeline_audio=self.loop_audio.get_active(),
             )

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +29,9 @@ class ExportSettings:
     replacement_audio_clips: tuple[TimelineAudioClip, ...] = ()
     format_name: str = "mp4"
     video_crf: int | None = None
+    video_encoder: str = "libx264"
+    video_preset: str = "medium"
+    target_video_bitrate_kbps: int | None = None
     crop: tuple[int, int, int, int] | None = None
     output_width: int | None = None
     output_height: int | None = None
@@ -39,7 +44,90 @@ class ExportSettings:
     source_height: int = 720
 
 
+class FilterGraphBuilder:
+    def __init__(self) -> None:
+        self._parts: list[str] = []
+
+    def add_gap_video(self, label: str, width: int, height: int, duration: float) -> None:
+        self._parts.append(
+            f"color=c=black:s={width}x{height}:d={duration:.3f},"
+            f"format=yuv420p[{label}]"
+        )
+
+    def add_gap_audio(self, label: str, duration: float) -> None:
+        self._parts.append(
+            f"anullsrc=channel_layout=stereo:sample_rate=48000,"
+            f"atrim=duration={duration:.3f},asetpts=PTS-STARTPTS[{label}]"
+        )
+
+    def add_video_trim(self, label: str, start: float, end: float) -> None:
+        self._parts.append(
+            f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS[{label}]"
+        )
+
+    def add_audio_trim(self, label: str, start: float, end: float) -> None:
+        self._parts.append(
+            f"[0:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[{label}]"
+        )
+
+    def add_concat(self, labels: str, count: int, with_audio: bool) -> None:
+        if with_audio:
+            self._parts.append(f"{labels}concat=n={count}:v=1:a=1[vcat][aout]")
+        else:
+            self._parts.append(f"{labels}concat=n={count}:v=1:a=0[vcat]")
+
+    def add_video_output(self, video_input: str, video_filter: str | None) -> None:
+        if video_filter:
+            self._parts.append(f"{video_input}{video_filter}[vout]")
+        else:
+            self._parts.append(f"{video_input}null[vout]")
+
+    def add_raw(self, part: str) -> None:
+        self._parts.append(part)
+
+    def build(self) -> str:
+        return ";".join(self._parts)
+
+
 def build_ffmpeg_command(settings: ExportSettings) -> list[str]:
+    return _build_ffmpeg_command(settings)
+
+
+def build_ffmpeg_commands(
+    settings: ExportSettings,
+    passlog_path: Path | None = None,
+    concat_manifest_path: Path | None = None,
+) -> list[list[str]]:
+    if _can_concat_demuxer_copy(settings):
+        if concat_manifest_path is None:
+            raise ValueError("concat_manifest_path is required for concat demuxer export")
+        write_concat_manifest(settings, concat_manifest_path)
+        return [_build_concat_demuxer_command(settings, concat_manifest_path)]
+    if _needs_two_pass(settings):
+        if passlog_path is None:
+            raise ValueError("passlog_path is required for two-pass export")
+        return [
+            _build_ffmpeg_command(settings, pass_number=1, passlog_path=passlog_path),
+            _build_ffmpeg_command(settings, pass_number=2, passlog_path=passlog_path),
+        ]
+    return [build_ffmpeg_command(settings)]
+
+
+def write_concat_manifest(settings: ExportSettings, manifest_path: Path) -> None:
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    for start, end in settings.video_segments:
+        lines.append(f"file '{_concat_escape(settings.input_path)}'")
+        lines.append(f"inpoint {start:.6f}")
+        lines.append(f"outpoint {end:.6f}")
+    manifest_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _build_ffmpeg_command(
+    settings: ExportSettings,
+    pass_number: int | None = None,
+    passlog_path: Path | None = None,
+) -> list[str]:
     command = ["ffmpeg", "-hide_banner", "-y", "-nostdin"]
     has_segments = _needs_complex_video_filter(settings)
     video_filter = None
@@ -91,7 +179,23 @@ def build_ffmpeg_command(settings: ExportSettings) -> list[str]:
                 command.extend(["-map", "1:a:0", "-shortest"])
     elif settings.audio_mode == "replace" and len(settings.replacement_audio_clips) > 1:
         command.extend(["-map", "0:v:0", "-map", "[mixout]", "-shortest"])
-    command.extend(_format_video_args(settings.format_name, settings.video_crf))
+    command.extend(
+        _format_video_args(
+            settings.format_name,
+            settings.video_crf,
+            settings.video_encoder,
+            settings.video_preset,
+            settings.target_video_bitrate_kbps,
+        )
+    )
+    if pass_number is not None:
+        if passlog_path is None:
+            raise ValueError("passlog_path is required for two-pass export")
+        command.extend(["-pass", str(pass_number), "-passlogfile", str(passlog_path)])
+
+    if pass_number == 1:
+        command.extend(["-an", "-f", "null", "-progress", "pipe:1", os.devnull])
+        return command
 
     if settings.audio_mode == "mute":
         command.append("-an")
@@ -120,6 +224,9 @@ def export_settings_from_project(
     output_height: int | None,
     audio_mode: str,
     loop_timeline_audio: bool,
+    video_encoder: str = "libx264",
+    video_preset: str = "medium",
+    target_video_bitrate_kbps: int | None = None,
 ) -> ExportSettings:
     if state.source_video_path is None:
         raise ValueError("No source video loaded")
@@ -154,6 +261,9 @@ def export_settings_from_project(
         replacement_audio_clips=audio_clips if resolved_audio_mode == "replace" else (),
         format_name=format_name,
         video_crf=video_crf,
+        video_encoder=video_encoder,
+        video_preset=video_preset,
+        target_video_bitrate_kbps=target_video_bitrate_kbps,
         crop=_source_crop_pixels(state),
         output_width=output_width,
         output_height=output_height,
@@ -165,6 +275,28 @@ def export_settings_from_project(
         source_width=state.working_width or state.source_width or 1280,
         source_height=state.working_height or state.source_height or 720,
     )
+
+
+def project_state_for_export(
+    state: ProjectState,
+    output_width: int | None,
+    output_height: int | None,
+    audio_mode: str,
+    loop_timeline_audio: bool,
+) -> ProjectState:
+    export_state = copy.deepcopy(state)
+    export_state.output_width = output_width
+    export_state.output_height = output_height
+    if audio_mode == "mute":
+        export_state.original_audio_enabled = False
+    elif audio_mode == "keep":
+        export_state.original_audio_enabled = True
+    export_state.original_audio_track.muted = not export_state.original_audio_enabled
+    for clip in export_state.original_audio_track.clips:
+        clip.muted = not export_state.original_audio_enabled
+    for clip in export_state.audio_clips:
+        clip.loop = loop_timeline_audio
+    return export_state
 
 
 def _linked_audio_muted(state: ProjectState, video_clip: object) -> bool:
@@ -179,10 +311,50 @@ def _linked_audio_muted(state: ProjectState, video_clip: object) -> bool:
     return not linked_audio or any(clip.muted for clip in linked_audio)
 
 
-def _format_video_args(format_name: str, video_crf: int | None) -> list[str]:
+def _format_video_args(
+    format_name: str,
+    video_crf: int | None,
+    video_encoder: str,
+    video_preset: str,
+    target_video_bitrate_kbps: int | None = None,
+) -> list[str]:
+    bitrate_args = ["-b:v", f"{target_video_bitrate_kbps}k"] if target_video_bitrate_kbps else []
     if format_name == "webm":
-        return ["-c:v", "libvpx-vp9", "-crf", str(video_crf or 32), "-b:v", "0"]
-    return ["-c:v", "libx264", "-crf", str(video_crf or 23), "-preset", "medium"]
+        return ["-c:v", "libvpx-vp9", *bitrate_args] if bitrate_args else ["-c:v", "libvpx-vp9", "-crf", str(video_crf or 32), "-b:v", "0"]
+    if video_encoder == "h264_nvenc":
+        quality_args = bitrate_args if bitrate_args else ["-cq:v", str(video_crf or 23)]
+        return ["-c:v", "h264_nvenc", *quality_args, "-preset", _nvenc_preset(video_preset)]
+    if video_encoder == "h264_qsv":
+        quality_args = bitrate_args if bitrate_args else ["-global_quality", str(video_crf or 23)]
+        return ["-c:v", "h264_qsv", *quality_args, "-preset", video_preset]
+    if video_encoder == "h264_amf":
+        if bitrate_args:
+            return ["-c:v", "h264_amf", "-quality", _amf_quality(video_preset), *bitrate_args]
+        return ["-c:v", "h264_amf", "-quality", _amf_quality(video_preset), "-qp_i", str(video_crf or 23), "-qp_p", str(video_crf or 23)]
+    quality_args = bitrate_args if bitrate_args else ["-crf", str(video_crf or 23)]
+    return ["-c:v", "libx264", *quality_args, "-preset", video_preset]
+
+
+def _nvenc_preset(preset: str) -> str:
+    return {
+        "ultrafast": "p1",
+        "superfast": "p2",
+        "veryfast": "p3",
+        "faster": "p4",
+        "fast": "p4",
+        "medium": "p5",
+        "slow": "p6",
+        "slower": "p7",
+        "veryslow": "p7",
+    }.get(preset, "p5")
+
+
+def _amf_quality(preset: str) -> str:
+    if preset in {"slow", "slower", "veryslow"}:
+        return "quality"
+    if preset in {"ultrafast", "superfast", "veryfast", "faster"}:
+        return "speed"
+    return "balanced"
 
 
 def _format_audio_args(format_name: str, replacement: bool) -> list[str]:
@@ -198,7 +370,27 @@ def _format_stream_copy_args(audio_mode: str) -> list[str]:
     return ["-c", "copy"]
 
 
+def _build_concat_demuxer_command(settings: ExportSettings, manifest_path: Path) -> list[str]:
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-y",
+        "-nostdin",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(manifest_path),
+    ]
+    command.extend(_format_stream_copy_args(settings.audio_mode))
+    command.extend(["-progress", "pipe:1", str(settings.output_path)])
+    return command
+
+
 def _can_stream_copy(settings: ExportSettings, has_segments: bool, video_filter: str | None) -> bool:
+    if settings.target_video_bitrate_kbps:
+        return False
     if has_segments or video_filter:
         return False
     if settings.audio_mode not in {"keep", "mute"}:
@@ -208,6 +400,49 @@ def _can_stream_copy(settings: ExportSettings, has_segments: bool, video_filter:
     if settings.format_name == "mkv":
         return True
     return settings.input_path.suffix.lower().lstrip(".") == settings.format_name
+
+
+def _can_concat_demuxer_copy(settings: ExportSettings) -> bool:
+    if len(settings.video_segments) <= 1:
+        return False
+    if settings.crop or settings.output_width or settings.output_height or settings.width:
+        return False
+    if settings.target_video_bitrate_kbps:
+        return False
+    if settings.audio_mode not in {"keep", "mute"}:
+        return False
+    if settings.replacement_audio_path is not None or settings.replacement_audio_clips:
+        return False
+    if any(settings.video_segment_audio_muted):
+        return False
+    if len(settings.video_segment_timeline_starts) != len(settings.video_segments):
+        return False
+    current = 0.0
+    for timeline_start, (start, end) in zip(
+        settings.video_segment_timeline_starts,
+        settings.video_segments,
+        strict=True,
+    ):
+        if end <= start:
+            return False
+        if abs(timeline_start - current) > 0.001:
+            return False
+        current += end - start
+    if settings.format_name == "mkv":
+        return True
+    return settings.input_path.suffix.lower().lstrip(".") == settings.format_name
+
+
+def _concat_escape(path: Path) -> str:
+    return str(path).replace("'", "'\\''")
+
+
+def _needs_two_pass(settings: ExportSettings) -> bool:
+    return bool(
+        settings.target_video_bitrate_kbps
+        and settings.video_encoder == "libx264"
+        and settings.format_name != "webm"
+    )
 
 
 def _build_audio_mix_filter(input_count: int) -> str:
@@ -238,7 +473,7 @@ def _build_video_filter(settings: ExportSettings) -> str | None:
 
 
 def _build_segment_filter(settings: ExportSettings) -> str:
-    parts: list[str] = []
+    graph = FilterGraphBuilder()
     video_labels: list[str] = []
     audio_labels: list[str] = []
     current_time = 0.0
@@ -251,22 +486,14 @@ def _build_segment_filter(settings: ExportSettings) -> str:
         gap = max(timeline_start - current_time, 0.0)
         if gap > 0.001:
             gap_video_label = f"gapv{index}"
-            parts.append(
-                f"color=c=black:s={settings.source_width}x{settings.source_height}:d={gap:.3f},"
-                f"format=yuv420p[{gap_video_label}]"
-            )
+            graph.add_gap_video(gap_video_label, settings.source_width, settings.source_height, gap)
             video_labels.append(f"[{gap_video_label}]")
             if settings.audio_mode == "keep":
                 gap_audio_label = f"gapa{index}"
-                parts.append(
-                    f"anullsrc=channel_layout=stereo:sample_rate=48000,"
-                    f"atrim=duration={gap:.3f},asetpts=PTS-STARTPTS[{gap_audio_label}]"
-                )
+                graph.add_gap_audio(gap_audio_label, gap)
                 audio_labels.append(f"[{gap_audio_label}]")
         video_label = f"v{index}"
-        parts.append(
-            f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS[{video_label}]"
-        )
+        graph.add_video_trim(video_label, start, end)
         video_labels.append(f"[{video_label}]")
         if settings.audio_mode == "keep":
             audio_label = f"a{index}"
@@ -277,35 +504,28 @@ def _build_segment_filter(settings: ExportSettings) -> str:
             )
             if audio_muted:
                 duration = max(end - start, 0.001)
-                parts.append(
-                    f"anullsrc=channel_layout=stereo:sample_rate=48000,"
-                    f"atrim=duration={duration:.3f},asetpts=PTS-STARTPTS[{audio_label}]"
-                )
+                graph.add_gap_audio(audio_label, duration)
             else:
-                parts.append(
-                    f"[0:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[{audio_label}]"
-                )
+                graph.add_audio_trim(audio_label, start, end)
             audio_labels.append(f"[{audio_label}]")
         current_time = timeline_start + max(end - start, 0.0)
 
     if settings.audio_mode == "keep":
-        parts.append(
-            "".join(label for pair in zip(video_labels, audio_labels, strict=True) for label in pair)
-            + f"concat=n={len(video_labels)}:v=1:a=1[vcat][aout]"
+        graph.add_concat(
+            "".join(label for pair in zip(video_labels, audio_labels, strict=True) for label in pair),
+            len(video_labels),
+            with_audio=True,
         )
         video_input = "[vcat]"
     else:
-        parts.append("".join(video_labels) + f"concat=n={len(video_labels)}:v=1:a=0[vcat]")
+        graph.add_concat("".join(video_labels), len(video_labels), with_audio=False)
         video_input = "[vcat]"
 
     video_filter = _build_video_filter(settings)
-    if video_filter:
-        parts.append(f"{video_input}{video_filter}[vout]")
-    else:
-        parts.append(f"{video_input}null[vout]")
+    graph.add_video_output(video_input, video_filter)
     if settings.audio_mode == "replace" and len(settings.replacement_audio_clips) > 1:
-        parts.append(_build_audio_mix_filter(len(settings.replacement_audio_clips)))
-    return ";".join(parts)
+        graph.add_raw(_build_audio_mix_filter(len(settings.replacement_audio_clips)))
+    return graph.build()
 
 
 def _source_crop_pixels(state: ProjectState) -> tuple[int, int, int, int] | None:

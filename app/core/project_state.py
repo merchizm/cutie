@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
+
+from app.core.track_ids import MUSIC_TRACK_ID, ORIGINAL_AUDIO_TRACK_ID, PRIMARY_VIDEO_CLIP_ID, VIDEO_TRACK_ID
+from app.core.tracks import default_tracks, ensure_default_tracks
 
 
 def _id() -> str:
@@ -118,6 +122,19 @@ class ProjectState:
     duration: float = 0.0
     original_audio_enabled: bool = True
     snap_threshold: float = 0.15
+    _track_lookup: dict[str, Track] = field(default_factory=dict, init=False, repr=False)
+    _track_lookup_ids: tuple[str, ...] = field(default_factory=tuple, init=False, repr=False)
+
+    def __deepcopy__(self, memo: dict[int, object]) -> ProjectState:
+        clone = type(self).__new__(type(self))
+        memo[id(self)] = clone
+        for key, value in self.__dict__.items():
+            if key in {"_track_lookup", "_track_lookup_ids"}:
+                continue
+            setattr(clone, key, copy.deepcopy(value, memo))
+        clone._track_lookup = {}
+        clone._track_lookup_ids = ()
+        return clone
 
     def load_source(
         self,
@@ -150,11 +167,8 @@ class ProjectState:
         self.media_pool = [path]
         self.playhead_time = 0.0
         self.original_audio_enabled = has_audio
-        self.tracks = [
-            Track("video", "Video", id="video"),
-            Track("audio", "Original audio", id="original-audio", muted=not has_audio),
-            Track("audio", "Music", id="music"),
-        ]
+        self.tracks = default_tracks(Track, has_audio)
+        self._invalidate_track_lookup()
         group_id = _id()
         self.video_track.clips.append(
             Clip(
@@ -164,11 +178,11 @@ class ProjectState:
                 source_out=self.source_duration,
                 timeline_start=0.0,
                 label=path.name,
-                track_id="video",
+                track_id=VIDEO_TRACK_ID,
                 linked_group_id=group_id if has_audio else None,
                 selected=True,
                 color="accent",
-                id="video",
+                id=PRIMARY_VIDEO_CLIP_ID,
             )
         )
         if has_audio:
@@ -180,29 +194,29 @@ class ProjectState:
                     source_out=self.source_duration,
                     timeline_start=0.0,
                     label="Original audio",
-                    track_id="original-audio",
+                    track_id=ORIGINAL_AUDIO_TRACK_ID,
                     linked_group_id=group_id,
                     color="original",
                 )
             )
-        self.selected_clip_ids = ["video"]
-        self.selected_clip_id = "video"
+        self.selected_clip_ids = [PRIMARY_VIDEO_CLIP_ID]
+        self.selected_clip_id = PRIMARY_VIDEO_CLIP_ID
         self._refresh_duration()
 
     @property
     def video_track(self) -> Track:
         self._ensure_tracks()
-        return self._track("video")
+        return self._track(VIDEO_TRACK_ID)
 
     @property
     def original_audio_track(self) -> Track:
         self._ensure_tracks()
-        return self._track("original-audio")
+        return self._track(ORIGINAL_AUDIO_TRACK_ID)
 
     @property
     def music_track(self) -> Track:
         self._ensure_tracks()
-        return self._track("music")
+        return self._track(MUSIC_TRACK_ID)
 
     @property
     def video_segments(self) -> list[Clip]:
@@ -242,6 +256,20 @@ class ProjectState:
 
     def trim_video_range(self, start: float, end: float) -> None:
         self._trim_video_range(start, end)
+
+    def set_pending_crop(self, x: float, y: float, width: float, height: float) -> None:
+        self.crop_enabled = True
+        self.crop_x = x
+        self.crop_y = y
+        self.crop_width = width
+        self.crop_height = height
+
+    def clear_pending_crop(self) -> None:
+        self.crop_enabled = False
+        self.crop_x = 0.0
+        self.crop_y = 0.0
+        self.crop_width = 1.0
+        self.crop_height = 1.0
 
     def apply_working_video(
         self,
@@ -283,11 +311,11 @@ class ProjectState:
                 source_out=self.working_duration,
                 timeline_start=0.0,
                 label=self.working_video_path.name,
-                track_id="video",
+                track_id=VIDEO_TRACK_ID,
                 linked_group_id=group_id if has_audio else None,
                 selected=True,
                 color="accent",
-                id="video",
+                id=PRIMARY_VIDEO_CLIP_ID,
             )
         ]
         self.original_audio_track.clips = []
@@ -300,14 +328,14 @@ class ProjectState:
                     source_out=self.working_duration,
                     timeline_start=0.0,
                     label="Original audio",
-                    track_id="original-audio",
+                    track_id=ORIGINAL_AUDIO_TRACK_ID,
                     linked_group_id=group_id,
                     color="original",
                     muted=not self.original_audio_enabled,
                 )
             )
-        self.selected_clip_ids = ["video"]
-        self.selected_clip_id = "video"
+        self.selected_clip_ids = [PRIMARY_VIDEO_CLIP_ID]
+        self.selected_clip_id = PRIMARY_VIDEO_CLIP_ID
         self.playhead_time = 0.0
         self._refresh_duration()
 
@@ -320,7 +348,7 @@ class ProjectState:
             source_out=max(duration, 0.0),
             timeline_start=max(timeline_start, 0.0),
             label=path.name,
-            track_id="music",
+            track_id=MUSIC_TRACK_ID,
             color="music",
             loop=True,
         )
@@ -335,7 +363,7 @@ class ProjectState:
 
     def selected_audio_clip(self) -> Clip | None:
         clip = self.selected_clip()
-        return clip if clip and clip.type == "audio" and clip.track_id == "music" else None
+        return clip if clip and clip.type == "audio" and clip.track_id == MUSIC_TRACK_ID else None
 
     def active_audio_clip(self) -> Clip | None:
         return next((clip for clip in self.music_track.clips if not clip.muted), None)
@@ -492,6 +520,9 @@ class ProjectState:
     def active_video_segments(self) -> list[Clip]:
         return [clip for clip in self.video_track.clips if clip.duration > 0]
 
+    def refresh_duration(self) -> None:
+        self._refresh_duration()
+
     def _split_clip(
         self,
         clip: Clip,
@@ -558,21 +589,24 @@ class ProjectState:
             linked_groups = {clip.linked_group_id for clip in self.video_track.clips if clip.linked_group_id}
             for track in self.tracks:
                 for clip in track.clips:
-                    if clip.track_id == "video" or clip.linked_group_id in linked_groups:
+                    if clip.track_id == VIDEO_TRACK_ID or clip.linked_group_id in linked_groups:
                         clip.timeline_start = max(clip.timeline_start - first_start, 0.0)
         self._refresh_duration()
 
     def _track(self, track_id: str) -> Track:
-        return next(track for track in self.tracks if track.id == track_id)
+        current_ids = tuple(track.id for track in self.tracks)
+        if current_ids != self._track_lookup_ids:
+            self._track_lookup = {track.id: track for track in self.tracks}
+            self._track_lookup_ids = current_ids
+        return self._track_lookup[track_id]
 
     def _ensure_tracks(self) -> None:
-        existing = {track.id for track in self.tracks}
-        if "video" not in existing:
-            self.tracks.append(Track("video", "Video", id="video"))
-        if "original-audio" not in existing:
-            self.tracks.append(Track("audio", "Original audio", id="original-audio", muted=True))
-        if "music" not in existing:
-            self.tracks.append(Track("audio", "Music", id="music"))
+        if ensure_default_tracks(self.tracks, Track):
+            self._invalidate_track_lookup()
+
+    def _invalidate_track_lookup(self) -> None:
+        self._track_lookup = {}
+        self._track_lookup_ids = ()
 
     def _linked_clips(self, linked_group_id: str) -> list[Clip]:
         return [clip for track in self.tracks for clip in track.clips if clip.linked_group_id == linked_group_id]

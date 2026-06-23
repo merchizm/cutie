@@ -10,6 +10,8 @@ from app.core.media_info import MediaInfo
 
 logger = logging.getLogger(__name__)
 FFPROBE_TIMEOUT_SECONDS = 30
+_info_cache: dict[tuple[Path, int, int], MediaInfo] = {}
+_duration_cache: dict[tuple[Path, int, int], float] = {}
 
 
 class FFprobeError(RuntimeError):
@@ -26,6 +28,10 @@ def _parse_fps(value: str | None) -> float:
 
 
 def read_media_info(path: Path) -> MediaInfo:
+    cache_key = _cache_key(path)
+    cached = _info_cache.get(cache_key)
+    if cached is not None:
+        return cached
     command = [
         "ffprobe",
         "-v",
@@ -58,6 +64,7 @@ def read_media_info(path: Path) -> MediaInfo:
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
+        logger.warning("ffprobe returned invalid JSON for %s", path)
         raise FFprobeError("ffprobe returned invalid metadata.") from exc
 
     video_stream = next(
@@ -68,7 +75,7 @@ def read_media_info(path: Path) -> MediaInfo:
     format_info = payload.get("format", {})
     duration = float(format_info.get("duration") or video_stream.get("duration") or 0)
 
-    return MediaInfo(
+    info = MediaInfo(
         path=path,
         duration=duration,
         width=int(video_stream.get("width") or 0),
@@ -78,9 +85,16 @@ def read_media_info(path: Path) -> MediaInfo:
         has_audio=has_audio,
         size_bytes=path.stat().st_size,
     )
+    _info_cache[cache_key] = info
+    _duration_cache[cache_key] = info.duration
+    return info
 
 
 def read_media_duration(path: Path) -> float:
+    cache_key = _cache_key(path)
+    cached = _duration_cache.get(cache_key)
+    if cached is not None:
+        return cached
     command = [
         "ffprobe",
         "-v",
@@ -99,7 +113,9 @@ def read_media_duration(path: Path) -> float:
             timeout=FFPROBE_TIMEOUT_SECONDS,
         )
         payload = json.loads(result.stdout)
-        return float(payload.get("format", {}).get("duration") or 0.0)
+        duration = float(payload.get("format", {}).get("duration") or 0.0)
+        _duration_cache[cache_key] = duration
+        return duration
     except FileNotFoundError as exc:
         logger.exception("ffprobe executable was not found")
         raise FFprobeError("ffprobe was not found. Install FFmpeg to use Cutie.") from exc
@@ -109,3 +125,14 @@ def read_media_duration(path: Path) -> float:
     except (subprocess.CalledProcessError, json.JSONDecodeError, ValueError) as exc:
         logger.warning("Could not read media duration for %s", path)
         raise FFprobeError("Could not read media duration.") from exc
+
+
+def clear_ffprobe_cache() -> None:
+    _info_cache.clear()
+    _duration_cache.clear()
+
+
+def _cache_key(path: Path) -> tuple[Path, int, int]:
+    resolved = path.resolve()
+    stat = resolved.stat()
+    return resolved, stat.st_mtime_ns, stat.st_size

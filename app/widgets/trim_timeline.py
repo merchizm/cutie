@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 
@@ -11,6 +12,9 @@ from gi.repository import Gdk, Gtk
 
 from app.core.project_state import AudioClip, VideoSegment
 from app.utils.timecode import clamp_time, seconds_to_label
+
+
+logger = logging.getLogger(__name__)
 
 
 class TimelineLayout:
@@ -47,8 +51,12 @@ class TrimTimeline(Gtk.Box):
         self._video_segments: list[VideoSegment] = []
         self._original_audio_clips: list[AudioClip] = []
         self._audio_clips: list[AudioClip] = []
+        self._video_segment_items: list[tuple[int, VideoSegment]] = []
+        self._original_audio_clips_by_start: list[AudioClip] = []
+        self._audio_clips_by_start: list[AudioClip] = []
         self._selected_clip_id: str | None = "video"
         self._zoom = 1.0
+        self._last_position_draw_x: float | None = None
         self._drag_mode: str | None = None
         self._drag_start_x = 0.0
         self._drag_clip_id: str | None = None
@@ -98,7 +106,7 @@ class TrimTimeline(Gtk.Box):
             drop.connect("drop", self._files_dropped)
             self.area.add_controller(drop)
         except AttributeError:
-            pass
+            logger.debug("Gtk.DropTarget FileList is not available; timeline file drop disabled.")
 
         self.append(header)
         self.append(self.area)
@@ -110,12 +118,14 @@ class TrimTimeline(Gtk.Box):
         self._trim_start = 0.0
         self._trim_end = self._duration
         self.set_sensitive(True)
+        self._invalidate_position_draw_cache()
         self.area.queue_draw()
 
     def update_duration(self, duration: float) -> None:
         self._duration = max(duration, 0.0)
         self._position = clamp_time(self._position, 0, self._duration)
         self._trim_end = max(self._trim_end, self._duration)
+        self._invalidate_position_draw_cache()
         self.area.queue_draw()
 
     def set_video_name(self, name: str) -> None:
@@ -123,8 +133,12 @@ class TrimTimeline(Gtk.Box):
         self.area.queue_draw()
 
     def set_position(self, seconds: float) -> None:
+        previous_x = self._last_position_draw_x if self._last_position_draw_x is not None else self._position_draw_x()
         self._position = clamp_time(seconds, 0, self._duration)
-        self.area.queue_draw()
+        next_x = self._position_draw_x()
+        if previous_x is None or next_x is None or abs(next_x - previous_x) >= 0.5:
+            self._last_position_draw_x = next_x
+            self.area.queue_draw()
 
     def set_audio_state(
         self,
@@ -140,15 +154,27 @@ class TrimTimeline(Gtk.Box):
 
     def set_audio_clips(self, clips: list[AudioClip], selected_clip_id: str | None) -> None:
         self._audio_clips = list(clips)
+        self._audio_clips_by_start = sorted(self._audio_clips, key=lambda clip: clip.timeline_start)
         self._selected_clip_id = selected_clip_id
+        self._invalidate_position_draw_cache()
         self.area.queue_draw()
 
     def set_original_audio_clips(self, clips: list[AudioClip]) -> None:
         self._original_audio_clips = list(clips)
+        self._original_audio_clips_by_start = sorted(
+            self._original_audio_clips,
+            key=lambda clip: clip.timeline_start,
+        )
+        self._invalidate_position_draw_cache()
         self.area.queue_draw()
 
     def set_video_segments(self, segments: list[VideoSegment]) -> None:
         self._video_segments = list(segments)
+        self._video_segment_items = sorted(
+            enumerate(self._video_segments),
+            key=lambda item: item[1].timeline_start,
+        )
+        self._invalidate_position_draw_cache()
         self.area.queue_draw()
 
     def select_video(self) -> None:
@@ -157,14 +183,17 @@ class TrimTimeline(Gtk.Box):
 
     def zoom_in(self) -> None:
         self._zoom = min(self._zoom * 1.5, 6.0)
+        self._invalidate_position_draw_cache()
         self.area.queue_draw()
 
     def zoom_out(self) -> None:
         self._zoom = max(self._zoom / 1.5, 0.5)
+        self._invalidate_position_draw_cache()
         self.area.queue_draw()
 
     def fit(self) -> None:
         self._zoom = 1.0
+        self._invalidate_position_draw_cache()
         self.area.queue_draw()
 
     def get_trim(self) -> tuple[float, float]:
@@ -219,7 +248,7 @@ class TrimTimeline(Gtk.Box):
 
         trim_x = self._time_to_x(self._trim_start, left, timeline_w)
         trim_w = max(self._time_to_x(self._trim_end, left, timeline_w) - trim_x, 8)
-        for index, segment in enumerate(self._video_segments):
+        for index, segment in self._visible_video_segments():
             segment_start = max(segment.start, self._trim_start)
             segment_end = min(segment.end, self._trim_end)
             if segment_end <= segment_start:
@@ -247,7 +276,7 @@ class TrimTimeline(Gtk.Box):
             original_label = "Original audio muted" if self._has_original_audio else "No original audio"
             self._draw_muted_audio(cr, left, audio_y, timeline_w, original_audio_h, muted, original_label)
         else:
-            for clip in self._original_audio_clips:
+            for clip in self._visible_clips(self._original_audio_clips_by_start):
                 clip_x = self._time_to_x(clip.timeline_start, left, timeline_w)
                 clip_w = max(self._time_to_x(clip.timeline_end, left, timeline_w) - clip_x, 6)
                 color = audio_color if not clip.muted else (0.5, 0.5, 0.55, 1.0)
@@ -263,7 +292,7 @@ class TrimTimeline(Gtk.Box):
                 )
 
         if self._audio_clips:
-            for clip in self._audio_clips:
+            for clip in self._visible_clips(self._audio_clips_by_start):
                 clip_x = self._time_to_x(clip.timeline_start, left, timeline_w)
                 clip_w = max(self._time_to_x(clip.timeline_end, left, timeline_w) - clip_x, 32)
                 color = (0.38, 0.32, 0.82, 1.0) if not clip.muted else (0.5, 0.5, 0.55, 1.0)
@@ -476,7 +505,7 @@ class TrimTimeline(Gtk.Box):
         track_h = TimelineLayout.TRACK_HEIGHT
         playhead_x = self._time_to_x(self._position, left, timeline_w)
         if video_y - 6 <= y <= video_y + track_h + 6:
-            for segment in self._video_segments:
+            for _index, segment in self._visible_video_segments():
                 segment_start = max(segment.start, self._trim_start)
                 segment_end = min(segment.end, self._trim_end)
                 segment_start_x = self._time_to_x(segment_start, left, timeline_w)
@@ -487,12 +516,12 @@ class TrimTimeline(Gtk.Box):
                     return f"right:{segment.id}"
                 if segment_start_x <= x <= segment_end_x:
                     return f"clip:{segment.id}"
-        for clip in self._original_audio_clips:
+        for clip in self._visible_clips(self._original_audio_clips_by_start):
             clip_x = self._time_to_x(clip.timeline_start, left, timeline_w)
             clip_w = max(self._time_to_x(clip.timeline_end, left, timeline_w) - clip_x, 6)
             if audio_y <= y <= audio_y + 20 and clip_x <= x <= clip_x + clip_w:
                 return f"clip:{clip.id}"
-        for clip in self._audio_clips:
+        for clip in self._visible_clips(self._audio_clips_by_start):
             clip_x = self._time_to_x(clip.timeline_start, left, timeline_w)
             clip_w = max(self._time_to_x(clip.timeline_end, left, timeline_w) - clip_x, 32)
             if audio_y + 22 <= y <= audio_y + 42 and clip_x <= x <= clip_x + clip_w:
@@ -538,6 +567,7 @@ class TrimTimeline(Gtk.Box):
         try:
             files = value.get_files()
         except AttributeError:
+            logger.debug("Timeline drop value does not expose get_files().")
             return False
         paths = [Path(file.get_path()) for file in files if file.get_path()]
         if not paths:
@@ -576,6 +606,38 @@ class TrimTimeline(Gtk.Box):
 
     def _visible_duration(self) -> float:
         return max(self._duration / self._zoom, 0.001)
+
+    def _visible_range(self) -> tuple[float, float]:
+        return 0.0, self._visible_duration()
+
+    def _visible_video_segments(self) -> list[tuple[int, VideoSegment]]:
+        start, end = self._visible_range()
+        visible: list[tuple[int, VideoSegment]] = []
+        for index, segment in self._video_segment_items:
+            if segment.timeline_start > end:
+                break
+            if segment.timeline_end >= start:
+                visible.append((index, segment))
+        return visible
+
+    def _visible_clips(self, clips_by_start: list[AudioClip]) -> list[AudioClip]:
+        start, end = self._visible_range()
+        visible: list[AudioClip] = []
+        for clip in clips_by_start:
+            if clip.timeline_start > end:
+                break
+            if clip.timeline_end >= start:
+                visible.append(clip)
+        return visible
+
+    def _position_draw_x(self) -> float | None:
+        if self._duration <= 0:
+            return None
+        left, timeline_w = self._geometry()
+        return self._time_to_x(self._position, left, timeline_w)
+
+    def _invalidate_position_draw_cache(self) -> None:
+        self._last_position_draw_x = None
 
     def _zoom_in(self, _button: Gtk.Button) -> None:
         self.zoom_in()

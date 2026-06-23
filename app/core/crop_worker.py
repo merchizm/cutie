@@ -8,6 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
 
+from app.core.ffmpeg_errors import summarize_ffmpeg_stderr
 from app.utils.timecode import seconds_to_timecode
 
 
@@ -88,6 +89,7 @@ class CropWorker:
             self._emit_done(success, self.output_path if success else None, message)
 
     def _run_command(self, command: list[str]) -> tuple[bool, str]:
+        process: subprocess.Popen[str] | None = None
         try:
             process = subprocess.Popen(
                 command,
@@ -107,13 +109,18 @@ class CropWorker:
         except FileNotFoundError:
             logger.exception("ffmpeg executable was not found for crop.")
             return False, "ffmpeg was not found. Install FFmpeg to crop videos."
+        except Exception as exc:
+            logger.exception("Failed to start crop process.")
+            return False, str(exc)
         finally:
             with self._lock:
                 self._process = None
+        if process is None:
+            return False, "Crop failed."
         if process.returncode == 0:
             return True, f"Cropped working video generated at {seconds_to_timecode(self.duration)} source duration."
-        message = stderr.strip().splitlines()[-1] if stderr.strip() else "Crop failed."
-        logger.warning("Crop command failed for %s: %s", self.input_path, message)
+        message = summarize_ffmpeg_stderr(stderr, "Crop failed.")
+        logger.warning("Crop command failed for %s: %s\n%s", self.input_path, message, stderr.strip())
         return False, message
 
     def _emit_done(self, success: bool, path: Path | None, message: str) -> None:
