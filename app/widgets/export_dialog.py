@@ -25,6 +25,9 @@ class DialogExportOptions:
     video_encoder: str
     video_preset: str
     target_video_bitrate_kbps: int | None
+    framerate: int | None
+    audio_codec: str
+    audio_bitrate_kbps: int
     audio_mode: str
     loop_timeline_audio: bool
 
@@ -50,6 +53,17 @@ class ExportSettingsDialog(Gtk.Window):
         "Custom CRF": -1,
     }
     PRESETS = ("ultrafast", "veryfast", "fast", "medium", "slow")
+    FRAMERATES = {
+        "Source": None,
+        "24 fps": 24,
+        "30 fps": 30,
+        "60 fps": 60,
+    }
+    AUDIO_CODECS = {
+        "AAC": "aac",
+        "Opus": "libopus",
+        "MP3": "libmp3lame",
+    }
 
     def __init__(
         self,
@@ -63,6 +77,7 @@ class ExportSettingsDialog(Gtk.Window):
         self.set_default_size(440, 520)
         self._output_path = default_output_path
         self._on_export = on_export
+        self._default_audio_mode = "timeline" if has_timeline_audio else ("keep" if original_audio_enabled else "mute")
 
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
         root.set_margin_top(18)
@@ -81,18 +96,16 @@ class ExportSettingsDialog(Gtk.Window):
         output_button.connect("clicked", self._choose_output)
 
         self.format_combo = self._combo(list(self.FORMATS), "MP4")
-        self.resolution_combo = self._combo(list(self.RESOLUTIONS), "Original")
-        self.aspect_combo = self._combo(list(self.ASPECTS), "Original")
         self.quality_combo = self._combo(list(self.QUALITY), "Balanced")
         self.quality_combo.connect("changed", self._quality_changed)
         self.encoder_options = available_h264_encoder_options()
         self.encoder_combo = self._combo(list(self.encoder_options), "CPU H.264")
         self.preset_combo = self._combo(list(self.PRESETS), "medium")
+        self.framerate_combo = self._combo(list(self.FRAMERATES), "Source")
+        self.audio_codec_combo = self._combo(list(self.AUDIO_CODECS), "AAC")
+        self.audio_bitrate = Gtk.SpinButton.new_with_range(64, 512, 32)
+        self.audio_bitrate.set_value(192)
 
-        self.custom_width = Gtk.SpinButton.new_with_range(2, 7680, 2)
-        self.custom_width.set_value(1280)
-        self.custom_height = Gtk.SpinButton.new_with_range(2, 7680, 2)
-        self.custom_height.set_value(720)
         self.custom_crf = Gtk.SpinButton.new_with_range(0, 51, 1)
         self.custom_crf.set_value(23)
         self.custom_crf.set_sensitive(False)
@@ -103,17 +116,6 @@ class ExportSettingsDialog(Gtk.Window):
         self.target_bitrate.set_value(6000)
         self.target_bitrate.set_sensitive(False)
 
-        self.audio_combo = Gtk.ComboBoxText()
-        self.audio_combo.append("keep", "Keep original")
-        self.audio_combo.append("mute", "Mute original")
-        self.audio_combo.append("timeline", "Use timeline audio")
-        if has_timeline_audio:
-            self.audio_combo.set_active_id("timeline")
-        elif original_audio_enabled:
-            self.audio_combo.set_active_id("keep")
-        else:
-            self.audio_combo.set_active_id("mute")
-
         self.loop_audio = Gtk.Switch()
         self.loop_audio.set_active(True)
 
@@ -122,15 +124,13 @@ class ExportSettingsDialog(Gtk.Window):
         group.add(self._row("Format", self.format_combo))
         group.add(self._row("Encoder", self.encoder_combo))
         group.add(self._row("Preset", self.preset_combo))
-        group.add(self._row("Resolution", self.resolution_combo))
-        group.add(self._row("Aspect", self.aspect_combo))
-        group.add(self._row("Custom width", self.custom_width))
-        group.add(self._row("Custom height", self.custom_height))
+        group.add(self._row("Framerate", self.framerate_combo))
         group.add(self._row("Quality", self.quality_combo))
         group.add(self._row("Custom CRF", self.custom_crf))
         group.add(self._row("Target bitrate", self.target_bitrate_switch))
         group.add(self._row("Bitrate kbps", self.target_bitrate))
-        group.add(self._row("Audio", self.audio_combo))
+        group.add(self._row("Audio codec", self.audio_codec_combo))
+        group.add(self._row("Audio bitrate kbps", self.audio_bitrate))
         group.add(self._row("Loop timeline audio", self.loop_audio))
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -193,40 +193,33 @@ class ExportSettingsDialog(Gtk.Window):
     def _export(self, _button: Gtk.Button) -> None:
         format_label = self.format_combo.get_active_text() or "MP4"
         format_name, extension = self.FORMATS[format_label]
-        width, height = self._resolve_output_size()
         quality_label = self.quality_combo.get_active_text() or "Balanced"
         crf = int(self.custom_crf.get_value()) if quality_label == "Custom CRF" else self.QUALITY[quality_label]
         encoder_label = self.encoder_combo.get_active_text() or "CPU H.264"
+        framerate_label = self.framerate_combo.get_active_text() or "Source"
+        audio_codec_label = self.audio_codec_combo.get_active_text() or "AAC"
         self._on_export(
             DialogExportOptions(
                 output_path=self._output_path,
                 format_name=format_name,
                 extension=extension,
-                output_width=width,
-                output_height=height,
-                aspect_mode=self.ASPECTS[self.aspect_combo.get_active_text() or "Original"],
+                output_width=None,
+                output_height=None,
+                aspect_mode="original",
                 video_crf=crf,
                 video_encoder=self.encoder_options.get(encoder_label, "libx264"),
                 video_preset=self.preset_combo.get_active_text() or "medium",
                 target_video_bitrate_kbps=(
                     int(self.target_bitrate.get_value()) if self.target_bitrate_switch.get_active() else None
                 ),
-                audio_mode=self.audio_combo.get_active_id() or "keep",
+                framerate=self.FRAMERATES[framerate_label],
+                audio_codec=self.AUDIO_CODECS[audio_codec_label],
+                audio_bitrate_kbps=int(self.audio_bitrate.get_value()),
+                audio_mode=self._default_audio_mode,
                 loop_timeline_audio=self.loop_audio.get_active(),
             )
         )
         self.close()
-
-    def _resolve_output_size(self) -> tuple[int | None, int | None]:
-        resolution = self.resolution_combo.get_active_text() or "Original"
-        aspect = self.ASPECTS[self.aspect_combo.get_active_text() or "Original"]
-        return resolve_output_size(
-            resolution,
-            aspect,
-            int(self.custom_width.get_value()),
-            int(self.custom_height.get_value()),
-        )
-
 
 def resolve_output_size(
     resolution: str,

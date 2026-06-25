@@ -32,6 +32,9 @@ class ExportSettings:
     video_encoder: str = "libx264"
     video_preset: str = "medium"
     target_video_bitrate_kbps: int | None = None
+    framerate: int | None = None
+    audio_codec: str | None = None
+    audio_bitrate_kbps: int | None = None
     crop: tuple[int, int, int, int] | None = None
     output_width: int | None = None
     output_height: int | None = None
@@ -128,7 +131,7 @@ def _build_ffmpeg_command(
     pass_number: int | None = None,
     passlog_path: Path | None = None,
 ) -> list[str]:
-    command = ["ffmpeg", "-hide_banner", "-y", "-nostdin"]
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-nostdin"]
     has_segments = _needs_complex_video_filter(settings)
     video_filter = None
 
@@ -188,6 +191,8 @@ def _build_ffmpeg_command(
             settings.target_video_bitrate_kbps,
         )
     )
+    if settings.framerate:
+        command.extend(["-r", str(settings.framerate)])
     if pass_number is not None:
         if passlog_path is None:
             raise ValueError("passlog_path is required for two-pass export")
@@ -205,11 +210,11 @@ def _build_ffmpeg_command(
         and len(settings.replacement_audio_clips) <= 1
     ):
         command.extend(["-map", "0:v:0", "-map", "1:a:0", "-shortest"])
-        command.extend(_format_audio_args(settings.format_name, replacement=True))
+        command.extend(_format_audio_args(settings.format_name, replacement=True, codec=settings.audio_codec, bitrate_kbps=settings.audio_bitrate_kbps))
     elif settings.audio_mode == "replace":
-        command.extend(_format_audio_args(settings.format_name, replacement=True))
+        command.extend(_format_audio_args(settings.format_name, replacement=True, codec=settings.audio_codec, bitrate_kbps=settings.audio_bitrate_kbps))
     else:
-        command.extend(_format_audio_args(settings.format_name, replacement=False))
+        command.extend(_format_audio_args(settings.format_name, replacement=False, codec=settings.audio_codec, bitrate_kbps=settings.audio_bitrate_kbps))
 
     command.extend(["-progress", "pipe:1", str(settings.output_path)])
     return command
@@ -227,6 +232,9 @@ def export_settings_from_project(
     video_encoder: str = "libx264",
     video_preset: str = "medium",
     target_video_bitrate_kbps: int | None = None,
+    framerate: int | None = None,
+    audio_codec: str | None = None,
+    audio_bitrate_kbps: int | None = None,
 ) -> ExportSettings:
     if state.source_video_path is None:
         raise ValueError("No source video loaded")
@@ -264,6 +272,9 @@ def export_settings_from_project(
         video_encoder=video_encoder,
         video_preset=video_preset,
         target_video_bitrate_kbps=target_video_bitrate_kbps,
+        framerate=framerate,
+        audio_codec=audio_codec,
+        audio_bitrate_kbps=audio_bitrate_kbps,
         crop=_source_crop_pixels(state),
         output_width=output_width,
         output_height=output_height,
@@ -357,11 +368,15 @@ def _amf_quality(preset: str) -> str:
     return "balanced"
 
 
-def _format_audio_args(format_name: str, replacement: bool) -> list[str]:
-    bitrate = "192k" if replacement else "128k"
-    if format_name == "webm":
-        return ["-c:a", "libopus", "-b:a", bitrate]
-    return ["-c:a", "aac", "-b:a", bitrate]
+def _format_audio_args(
+    format_name: str,
+    replacement: bool,
+    codec: str | None = None,
+    bitrate_kbps: int | None = None,
+) -> list[str]:
+    resolved_codec = codec or ("libopus" if format_name == "webm" else "aac")
+    bitrate = f"{bitrate_kbps or (192 if replacement else 128)}k"
+    return ["-c:a", resolved_codec, "-b:a", bitrate]
 
 
 def _format_stream_copy_args(audio_mode: str) -> list[str]:
@@ -374,6 +389,8 @@ def _build_concat_demuxer_command(settings: ExportSettings, manifest_path: Path)
     command = [
         "ffmpeg",
         "-hide_banner",
+        "-loglevel",
+        "error",
         "-y",
         "-nostdin",
         "-f",

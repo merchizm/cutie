@@ -134,5 +134,9 @@ def clear_ffprobe_cache() -> None:
 
 def _cache_key(path: Path) -> tuple[Path, int, int]:
     resolved = path.resolve()
-    stat = resolved.stat()
+    try:
+        stat = resolved.stat()
+    except OSError as exc:
+        logger.warning("Media file could not be accessed: %s", path)
+        raise FFprobeError(f"Media file could not be accessed: {path}") from exc
     return resolved, stat.st_mtime_ns, stat.st_size

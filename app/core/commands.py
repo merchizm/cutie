@@ -231,117 +231,63 @@ class TrimVideoRangeCommand:
     def __init__(self, start: float, end: float) -> None:
         self.start = start
         self.end = end
-        self._track_clips: dict[str, list[Clip]] = {}
-        self._selected_clip_ids: list[str] = []
-        self._selected_clip_id: str | None = None
+        self._snapshot: dict[str, object] = {}
 
     def execute(self, state: ProjectState) -> bool:
         if self.end <= self.start:
             return False
         before = _track_signature(state)
-        self._track_clips = {
-            track.id: copy.deepcopy(track.clips)
-            for track in state.tracks
-        }
-        self._selected_clip_ids = list(state.selected_clip_ids)
-        self._selected_clip_id = state.selected_clip_id
+        self._snapshot = _timeline_snapshot(state)
         state.trim_video_range(self.start, self.end)
         if _track_signature(state) != before:
             return True
-        self._track_clips = {}
-        self._selected_clip_ids = []
-        self._selected_clip_id = None
+        self._snapshot = {}
         return False
 
     def undo(self, state: ProjectState) -> None:
-        for track in state.tracks:
-            if track.id in self._track_clips:
-                track.clips = copy.deepcopy(self._track_clips[track.id])
-        state.selected_clip_ids = list(self._selected_clip_ids)
-        state.selected_clip_id = self._selected_clip_id
-        state.refresh_duration()
+        _restore_timeline_snapshot(state, self._snapshot)
 
     def referenced_paths(self) -> set[Path]:
-        return _clip_paths(
-            clip
-            for clips in self._track_clips.values()
-            for clip in clips
-        )
+        return _timeline_snapshot_paths(self._snapshot)
 
 
 class DeleteSelectedClipCommand:
     def __init__(self) -> None:
-        self._track_clips: dict[str, list[Clip]] = {}
-        self._selected_clip_ids: list[str] = []
-        self._selected_clip_id: str | None = None
+        self._snapshot: dict[str, object] = {}
 
     def execute(self, state: ProjectState) -> bool:
         if not state.selected_clip_ids:
             return False
-        self._track_clips = {
-            track.id: copy.deepcopy(track.clips)
-            for track in state.tracks
-        }
-        self._selected_clip_ids = list(state.selected_clip_ids)
-        self._selected_clip_id = state.selected_clip_id
+        self._snapshot = _timeline_snapshot(state)
         if state.delete_selected_clip():
             return True
-        self._track_clips = {}
-        self._selected_clip_ids = []
-        self._selected_clip_id = None
+        self._snapshot = {}
         return False
 
     def undo(self, state: ProjectState) -> None:
-        for track in state.tracks:
-            if track.id in self._track_clips:
-                track.clips = copy.deepcopy(self._track_clips[track.id])
-        state.selected_clip_ids = list(self._selected_clip_ids)
-        state.selected_clip_id = self._selected_clip_id
-        state.refresh_duration()
+        _restore_timeline_snapshot(state, self._snapshot)
 
     def referenced_paths(self) -> set[Path]:
-        return _clip_paths(
-            clip
-            for clips in self._track_clips.values()
-            for clip in clips
-        )
+        return _timeline_snapshot_paths(self._snapshot)
 
 
 class SplitAtCommand:
     def __init__(self, seconds: float) -> None:
         self.seconds = seconds
-        self._track_clips: dict[str, list[Clip]] = {}
-        self._selected_clip_ids: list[str] = []
-        self._selected_clip_id: str | None = None
+        self._snapshot: dict[str, object] = {}
 
     def execute(self, state: ProjectState) -> bool:
-        self._track_clips = {
-            track.id: copy.deepcopy(track.clips)
-            for track in state.tracks
-        }
-        self._selected_clip_ids = list(state.selected_clip_ids)
-        self._selected_clip_id = state.selected_clip_id
+        self._snapshot = _timeline_snapshot(state)
         if state.split_at(self.seconds):
             return True
-        self._track_clips = {}
-        self._selected_clip_ids = []
-        self._selected_clip_id = None
+        self._snapshot = {}
         return False
 
     def undo(self, state: ProjectState) -> None:
-        for track in state.tracks:
-            if track.id in self._track_clips:
-                track.clips = copy.deepcopy(self._track_clips[track.id])
-        state.selected_clip_ids = list(self._selected_clip_ids)
-        state.selected_clip_id = self._selected_clip_id
-        state.refresh_duration()
+        _restore_timeline_snapshot(state, self._snapshot)
 
     def referenced_paths(self) -> set[Path]:
-        return _clip_paths(
-            clip
-            for clips in self._track_clips.values()
-            for clip in clips
-        )
+        return _timeline_snapshot_paths(self._snapshot)
 
 
 def _set_original_audio_enabled(state: ProjectState, enabled: bool) -> None:
@@ -381,6 +327,39 @@ def _move_targets(state: ProjectState, clip_id: str) -> list[Clip]:
 
 def _trim_targets(state: ProjectState, clip_id: str) -> list[Clip]:
     return _move_targets(state, clip_id)
+
+
+def _timeline_snapshot(state: ProjectState) -> dict[str, object]:
+    return {
+        "track_clips": {track.id: copy.deepcopy(track.clips) for track in state.tracks},
+        "selected_clip_ids": list(state.selected_clip_ids),
+        "selected_clip_id": state.selected_clip_id,
+    }
+
+
+def _restore_timeline_snapshot(state: ProjectState, snapshot: dict[str, object]) -> None:
+    track_clips = snapshot.get("track_clips", {})
+    if isinstance(track_clips, dict):
+        for track in state.tracks:
+            if track.id in track_clips:
+                track.clips = copy.deepcopy(track_clips[track.id])
+    state.selected_clip_ids = list(snapshot.get("selected_clip_ids", []))
+    selected_clip_id = snapshot.get("selected_clip_id")
+    state.selected_clip_id = selected_clip_id if isinstance(selected_clip_id, str) else None
+    state.refresh_duration()
+
+
+def _timeline_snapshot_paths(snapshot: dict[str, object]) -> set[Path]:
+    track_clips = snapshot.get("track_clips", {})
+    if not isinstance(track_clips, dict):
+        return set()
+    return _clip_paths(
+        clip
+        for clips in track_clips.values()
+        if isinstance(clips, list)
+        for clip in clips
+        if isinstance(clip, Clip)
+    )
 
 
 def _clip_paths(clips: Iterable[Clip]) -> set[Path]:

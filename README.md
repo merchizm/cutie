@@ -10,12 +10,13 @@ editing, cropping, timeline edits, audio replacement, and format conversion.
   working video, reloads the preview, and exports from that working source.
 - Timeline video and audio clips backed by project state, not pixel-only UI.
 - Split at playhead for video clips and linked original audio.
-- Movable and trimmable timeline clips with delete and mute actions.
+- Movable and trimmable timeline clips with delete actions.
+- Original audio can be toggled independently from timeline clips.
 - Audio/music import from the Add Audio button or direct drag/drop onto the
   timeline.
 - Export respects the working source, split video clips, timeline audio
   position, mute state, output format, quality, and resolution settings.
-- Undo/redo snapshots for core crop and timeline operations.
+- Command-based undo/redo for core crop and timeline operations.
 
 ## Requirements
 
@@ -42,4 +43,11 @@ sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 ffmpeg gstreamer1.0-liba
 
 ```bash
 python3 main.py
+```
+
+## Test
+
+```bash
+python3 -m compileall app tests
+python3 -m tests.run_backend
 ```

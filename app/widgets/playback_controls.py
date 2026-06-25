@@ -21,11 +21,11 @@ class PlaybackControls(Gtk.Box):
         self._duration = 0.0
         self._updating = False
 
-        self.jump_start_button = self._icon_button("go-first-symbolic", "Jump to start")
+        self.jump_start_button = self._icon_button("media-skip-backward-symbolic", "Jump to start")
         self.back_button = self._icon_button("media-seek-backward-symbolic", "Seek backward")
         self.play_button = self._icon_button("media-playback-start-symbolic", "Play or pause")
         self.forward_button = self._icon_button("media-seek-forward-symbolic", "Seek forward")
-        self.jump_end_button = self._icon_button("go-last-symbolic", "Jump to end")
+        self.jump_end_button = self._icon_button("media-skip-forward-symbolic", "Jump to end")
 
         self.time_spin = Gtk.SpinButton.new_with_range(0, 1, 0.1)
         self.time_spin.set_digits(1)

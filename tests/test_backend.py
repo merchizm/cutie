@@ -1,5 +1,6 @@
 import tempfile
 import copy
+import logging
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from app.core.ffmpeg_errors import summarize_ffmpeg_stderr
 from app.core.project_references import referenced_media_paths
 from app.core.project_state import CropRecord, ProjectState
 from app.core.undo_history import UndoHistory
+import app.utils.paths as path_utils
 from app.utils.numbers import even_floor
 from app.utils.timecode import seconds_to_label, seconds_to_timecode
 
@@ -59,6 +61,31 @@ def test_summarize_ffmpeg_stderr_uses_fallback_for_empty_output() -> None:
     assert summarize_ffmpeg_stderr("", "Crop failed.") == "Crop failed."
 
 
+def test_ffprobe_reader_wraps_missing_media_file_errors() -> None:
+    ffprobe_reader.clear_ffprobe_cache()
+    missing = Path("missing-input-file.mp4")
+    logger = logging.getLogger("app.core.ffprobe_reader")
+    previous_disabled = logger.disabled
+
+    try:
+        logger.disabled = True
+        try:
+            ffprobe_reader.read_media_info(missing)
+        except ffprobe_reader.FFprobeError as exc:
+            assert "could not be accessed" in str(exc)
+        else:
+            raise AssertionError("missing media info should raise FFprobeError")
+
+        try:
+            ffprobe_reader.read_media_duration(missing)
+        except ffprobe_reader.FFprobeError as exc:
+            assert "could not be accessed" in str(exc)
+        else:
+            raise AssertionError("missing media duration should raise FFprobeError")
+    finally:
+        logger.disabled = previous_disabled
+
+
 def test_mute_resize_command() -> None:
     command = build_ffmpeg_command(
         ExportSettings(
@@ -71,6 +98,7 @@ def test_mute_resize_command() -> None:
             video_crf=18,
         )
     )
+    assert command[command.index("-loglevel") + 1] == "error"
     assert "-ss" in command
     assert "00:00:12.300" in command
     assert "-to" in command
@@ -348,6 +376,7 @@ def test_split_segments_can_use_concat_demuxer_fast_path() -> None:
 
     assert len(commands) == 1
     assert "-filter_complex" not in command
+    assert command[command.index("-loglevel") + 1] == "error"
     assert command[command.index("-f") + 1] == "concat"
     assert command[command.index("-c") + 1] == "copy"
     assert str(manifest) in command
@@ -1031,6 +1060,40 @@ def test_even_floor_clamps_and_rounds_to_lower_even() -> None:
     assert even_floor(-3) == 0
     assert even_floor(853) == 852
     assert even_floor(854) == 854
+
+
+def test_open_folder_returns_false_when_process_cannot_start() -> None:
+    original_popen = path_utils.subprocess.Popen
+    logger = logging.getLogger("app.utils.paths")
+    previous_disabled = logger.disabled
+
+    def fail_popen(*_args: object, **_kwargs: object) -> object:
+        raise OSError("xdg-open unavailable")
+
+    try:
+        logger.disabled = True
+        path_utils.subprocess.Popen = fail_popen
+        assert not path_utils.open_folder(Path("output.mp4"))
+    finally:
+        logger.disabled = previous_disabled
+        path_utils.subprocess.Popen = original_popen
+
+
+def test_open_folder_uses_parent_for_file_path() -> None:
+    calls: list[list[str]] = []
+    original_popen = path_utils.subprocess.Popen
+
+    def fake_popen(command: list[str], *_args: object, **_kwargs: object) -> object:
+        calls.append(command)
+        return object()
+
+    try:
+        path_utils.subprocess.Popen = fake_popen
+        assert path_utils.open_folder(Path("render/output.mp4"))
+    finally:
+        path_utils.subprocess.Popen = original_popen
+
+    assert calls == [["xdg-open", "render"]]
 
 
 def test_crop_worker_cleanup_removes_owned_temp_file() -> None:

@@ -20,7 +20,6 @@ from app.core.commands import (
     ResetToOriginalVideoCommand,
     SplitAtCommand,
     ToggleOriginalAudioCommand,
-    ToggleSelectedAudioMuteCommand,
     TrimClipCommand,
     TrimVideoRangeCommand,
 )
@@ -43,6 +42,8 @@ from app.widgets.trim_timeline import TrimTimeline
 
 logger = logging.getLogger(__name__)
 UNDO_LIMIT = 50
+AUDIO_SUFFIXES = {".mp3", ".aac", ".ogg", ".opus", ".flac", ".wav", ".m4a", ".wma", ".aiff", ".aif"}
+VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv", ".wmv", ".m4v", ".ts"}
 
 
 class CutieWindow(Adw.ApplicationWindow):
@@ -58,6 +59,7 @@ class CutieWindow(Adw.ApplicationWindow):
         self.last_output_path: Path | None = None
         self.owned_temp_files: set[Path] = set()
         self.undo_history = UndoHistory(UNDO_LIMIT)
+        self.video_has_audio = False
 
         self.toast_overlay = Adw.ToastOverlay()
         toolbar_view = Adw.ToolbarView()
@@ -70,6 +72,7 @@ class CutieWindow(Adw.ApplicationWindow):
         self.timeline = TrimTimeline()
         self.preview.on_position_changed = self._preview_position_changed
         self.preview.on_crop_changed = self._crop_changed
+        self.preview.on_crop_mode_changed = self._crop_mode_changed
         self.playback.on_seek = self._seek_preview
         self.playback.on_toggle_playback = self.preview.toggle_playback
         self.timeline.on_seek = self._seek_preview
@@ -141,12 +144,10 @@ class CutieWindow(Adw.ApplicationWindow):
         open_button.add_css_class("suggested-action")
         open_button.connect("clicked", self._choose_video)
 
-        music_button = Gtk.Button(label="Add Music")
-        music_button.connect("clicked", self._choose_audio)
-
-        reset_original_button = Gtk.Button(label="Original")
-        reset_original_button.set_tooltip_text("Reset to original video")
-        reset_original_button.connect("clicked", self._reset_to_original)
+        media_button = Gtk.Button(label="Add Media")
+        media_button.set_icon_name("list-add-symbolic")
+        media_button.set_tooltip_text("Add a video or audio file to the timeline")
+        media_button.connect("clicked", self._choose_media)
 
         export_button = Gtk.Button()
         export_button.set_icon_name("document-send-symbolic")
@@ -154,24 +155,26 @@ class CutieWindow(Adw.ApplicationWindow):
         export_button.connect("clicked", self._start_export)
 
         header.pack_start(open_button)
-        header.pack_start(music_button)
-        header.pack_start(reset_original_button)
+        header.pack_start(media_button)
         header.pack_end(export_button)
         return header
 
     def _build_timeline_toolbar(self) -> Gtk.Box:
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         toolbar.set_hexpand(True)
-        self.add_video_button = self._tool_button("list-add-symbolic", "Add video")
-        self.add_video_button.connect("clicked", self._choose_video)
-        self.add_audio_button = self._tool_button("audio-x-generic-symbolic", "Add audio/music")
-        self.add_audio_button.connect("clicked", self._choose_audio)
+        self.add_media_button = self._tool_button("list-add-symbolic", "Add a video or audio file to the timeline")
+        self.add_media_button.connect("clicked", self._choose_media)
+        self.crop_button = Gtk.ToggleButton(label="Crop")
+        self.crop_button.set_tooltip_text("Crop video resolution")
+        self.crop_button.connect("toggled", self._crop_button_toggled)
         self.split_button = self._tool_button("edit-cut-symbolic", "Split at playhead")
         self.split_button.connect("clicked", self._split_at_playhead)
         self.delete_button = self._tool_button("edit-delete-symbolic", "Delete selected clip")
         self.delete_button.connect("clicked", self._delete_selected_clip)
-        self.original_audio_button = self._tool_button("audio-speakers-symbolic", "Toggle original audio")
+        self.original_audio_button = self._tool_button("audio-volume-high-symbolic", "Toggle original audio")
         self.original_audio_button.connect("clicked", self._toggle_original_audio)
+        self.reset_original_button = self._tool_button("edit-clear-symbolic", "Reset to original video")
+        self.reset_original_button.connect("clicked", self._reset_to_original)
         self.zoom_out_button = self._tool_button("zoom-out-symbolic", "Zoom out timeline")
         self.zoom_out_button.connect("clicked", lambda _button: self.timeline.zoom_out())
         self.zoom_in_button = self._tool_button("zoom-in-symbolic", "Zoom in timeline")
@@ -184,11 +187,13 @@ class CutieWindow(Adw.ApplicationWindow):
         self.redo_button = self._tool_button("edit-redo-symbolic", "Redo")
         self.redo_button.connect("clicked", lambda _button: self._redo())
         for child in (
-            self.add_video_button,
-            self.add_audio_button,
+            self.add_media_button,
+            self.crop_button,
+            self.preview.crop_tools_revealer,
             self.split_button,
             self.delete_button,
             self.original_audio_button,
+            self.reset_original_button,
             self.undo_button,
             self.redo_button,
             self.zoom_out_button,
@@ -269,9 +274,9 @@ class CutieWindow(Adw.ApplicationWindow):
         if path:
             dropped_path = Path(path)
             suffix = dropped_path.suffix.lower()
-            if suffix in {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac"}:
+            if suffix in AUDIO_SUFFIXES:
                 self._timeline_files_dropped([dropped_path], self.state.playhead_time, "audio")
-            elif suffix in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}:
+            elif suffix in VIDEO_SUFFIXES:
                 self._timeline_files_dropped([dropped_path], self.state.playhead_time, "video")
             else:
                 self._toast("Unsupported file type.")
@@ -288,7 +293,7 @@ class CutieWindow(Adw.ApplicationWindow):
         )
         video_filter = Gtk.FileFilter()
         video_filter.set_name("Video files")
-        for pattern in ("*.mp4", "*.mkv", "*.webm", "*.mov", "*.avi", "*.m4v"):
+        for pattern in ("*.mp4", "*.mkv", "*.mov", "*.avi", "*.webm", "*.flv", "*.wmv", "*.m4v", "*.ts"):
             video_filter.add_pattern(pattern)
         dialog.add_filter(video_filter)
         dialog.connect("response", self._video_dialog_response)
@@ -302,28 +307,50 @@ class CutieWindow(Adw.ApplicationWindow):
                 self._load_video(path)
         dialog.destroy()
 
-    def _choose_audio(self, _button: Gtk.Button) -> None:
+    def _choose_media(self, _button: Gtk.Button) -> None:
         dialog = Gtk.FileChooserNative(
-            title="Choose Audio",
+            title="Add Media",
             transient_for=self,
             action=Gtk.FileChooserAction.OPEN,
-            accept_label="Choose",
+            accept_label="Add",
             cancel_label="Cancel",
         )
+        media_filter = Gtk.FileFilter()
+        media_filter.set_name("Audio and video files")
+        for pattern in (
+            "*.mp3", "*.aac", "*.ogg", "*.opus", "*.flac", "*.wav", "*.m4a", "*.wma", "*.aiff", "*.aif",
+            "*.mp4", "*.mkv", "*.mov", "*.avi", "*.webm", "*.flv", "*.wmv", "*.m4v", "*.ts",
+        ):
+            media_filter.add_pattern(pattern)
+        dialog.add_filter(media_filter)
         audio_filter = Gtk.FileFilter()
         audio_filter.set_name("Audio files")
-        for pattern in ("*.mp3", "*.wav", "*.flac", "*.ogg", "*.m4a", "*.aac"):
+        for pattern in ("*.mp3", "*.aac", "*.ogg", "*.opus", "*.flac", "*.wav", "*.m4a", "*.wma", "*.aiff", "*.aif"):
             audio_filter.add_pattern(pattern)
         dialog.add_filter(audio_filter)
-        dialog.connect("response", self._audio_dialog_response)
+        video_filter = Gtk.FileFilter()
+        video_filter.set_name("Video files")
+        for pattern in ("*.mp4", "*.mkv", "*.mov", "*.avi", "*.webm", "*.flv", "*.wmv", "*.m4v", "*.ts"):
+            video_filter.add_pattern(pattern)
+        dialog.add_filter(video_filter)
+        dialog.connect("response", self._media_dialog_response)
         dialog.show()
 
-    def _audio_dialog_response(self, dialog: Gtk.FileChooserNative, response: int) -> None:
+    def _media_dialog_response(self, dialog: Gtk.FileChooserNative, response: int) -> None:
         if response == Gtk.ResponseType.ACCEPT:
             file = dialog.get_file()
             path = Path(file.get_path()) if file and file.get_path() else None
             if path is not None:
-                self._load_audio_clip(path, self.state.playhead_time)
+                suffix = path.suffix.lower()
+                if suffix in AUDIO_SUFFIXES:
+                    self._load_audio_clip(path, self.state.playhead_time)
+                elif suffix in VIDEO_SUFFIXES:
+                    if self.media_info is None:
+                        self._load_video(path)
+                    else:
+                        self._toast("Only one video source is supported for now.")
+                else:
+                    self._toast("Unsupported file type.")
         dialog.destroy()
 
     def _load_video(self, path: Path) -> None:
@@ -350,6 +377,7 @@ class CutieWindow(Adw.ApplicationWindow):
             self._toast("Could not read video metadata.")
             return False
         self.media_info = info
+        self.video_has_audio = info.has_audio
         self.state.load_source(path, info.duration, info.width, info.height, info.has_audio)
         if pending_audio:
             self.state.audio_clips = pending_audio
@@ -364,6 +392,7 @@ class CutieWindow(Adw.ApplicationWindow):
         self.timeline.set_video_name(info.filename)
         self.timeline.set_video_segments(self.state.video_segments)
         self._sync_timeline_audio()
+        self._sync_original_audio_controls()
         self.last_output_path = default_output_path(path, "mp4")
         self._set_metadata(info)
         self._toast("Video loaded.")
@@ -426,6 +455,7 @@ class CutieWindow(Adw.ApplicationWindow):
             self._toast("Already using the original video.")
             return False
         self.media_info = info
+        self.video_has_audio = info.has_audio
         self.preview.load_file(str(path), info.duration)
         self.preview.set_source_size(info.width, info.height)
         self.preview.set_crop(False, 0.0, 0.0, 1.0, 1.0)
@@ -434,6 +464,7 @@ class CutieWindow(Adw.ApplicationWindow):
         self.timeline.set_video_name(path.name)
         self.timeline.set_video_segments(self.state.video_segments)
         self._sync_timeline_audio()
+        self._sync_original_audio_controls()
         self.last_output_path = default_output_path(path, "mp4")
         self._set_metadata(info)
         self._cleanup_unreferenced_temp_files()
@@ -476,6 +507,9 @@ class CutieWindow(Adw.ApplicationWindow):
                 video_encoder=options.video_encoder,
                 video_preset=options.video_preset,
                 target_video_bitrate_kbps=options.target_video_bitrate_kbps,
+                framerate=options.framerate,
+                audio_codec=options.audio_codec,
+                audio_bitrate_kbps=options.audio_bitrate_kbps,
             )
         except ValueError as exc:
             self._toast(str(exc))
@@ -639,6 +673,7 @@ class CutieWindow(Adw.ApplicationWindow):
         self.timeline.set_video_name(path.name)
         self.timeline.set_video_segments(self.state.video_segments)
         self._sync_timeline_audio()
+        self._sync_original_audio_controls()
         self._set_metadata(info)
         self._toast("Crop applied to working video.")
         return False
@@ -676,14 +711,6 @@ class CutieWindow(Adw.ApplicationWindow):
             self.timeline.set_video_segments(self.state.video_segments)
             self._sync_timeline_audio()
 
-    def _mute_selected_clip(self, _button: Gtk.Button) -> None:
-        if self.undo_history.execute(self.state, ToggleSelectedAudioMuteCommand()):
-            self._sync_timeline_audio()
-            self._cleanup_unreferenced_temp_files()
-            self._toast("Mute toggled.")
-        else:
-            self._toast("Select an audio clip or video with linked audio.")
-
     def _split_at_playhead(self, _button: Gtk.Button) -> None:
         if self.media_info is None:
             self._toast("Open a video first.")
@@ -697,6 +724,9 @@ class CutieWindow(Adw.ApplicationWindow):
             self._toast("Move the playhead inside a video segment to split.")
 
     def _toggle_original_audio(self, _button: Gtk.Button) -> None:
+        if not self.video_has_audio:
+            self._toast("This video has no original audio.")
+            return
         if not self.undo_history.execute(self.state, ToggleOriginalAudioCommand()):
             self._toast("This video has no original audio.")
             return
@@ -710,17 +740,34 @@ class CutieWindow(Adw.ApplicationWindow):
         self.timeline.set_audio_state(mode, None, self.state.source_has_audio)
         self.timeline.set_original_audio_clips(self.state.original_audio_track.clips)
         self.timeline.set_audio_clips(self.state.audio_clips, self.state.selected_clip_id)
+        self.preview.set_timeline_audio_clips(self.state.active_audio_clips())
+        self.preview.set_original_audio_preview_enabled(self.state.original_audio_enabled and self.state.source_has_audio)
+        self._sync_original_audio_controls()
+
+    def _sync_original_audio_controls(self) -> None:
+        enabled = self.video_has_audio and self.state.source_has_audio
+        self.original_audio_button.set_sensitive(enabled)
+        self.original_audio_button.set_tooltip_text(
+            "Toggle original audio" if enabled else "This video has no original audio"
+        )
 
     def _timeline_files_dropped(self, paths: list[Path], seconds: float, track_type: str) -> None:
         path = paths[0]
-        if track_type == "audio" or path.suffix.lower() in {".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac"}:
+        if track_type == "audio" or path.suffix.lower() in AUDIO_SUFFIXES:
             self._load_audio_clip(path, seconds)
             return
-        if path.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}:
+        if path.suffix.lower() in VIDEO_SUFFIXES:
             if self.media_info is None:
                 self._load_video(path)
             else:
                 self._toast("Only one video source is supported for now.")
+
+    def _crop_button_toggled(self, button: Gtk.ToggleButton) -> None:
+        self.preview.set_crop_mode(button.get_active())
+
+    def _crop_mode_changed(self, enabled: bool) -> None:
+        if self.crop_button.get_active() != enabled:
+            self.crop_button.set_active(enabled)
 
     def _add_audio_clip(self, path: Path, duration: float, seconds: float) -> AudioClip:
         command = AddAudioClipCommand(path, duration, seconds)
@@ -806,7 +853,8 @@ class CutieWindow(Adw.ApplicationWindow):
 
     def _open_output_folder(self, _button: Gtk.Button) -> None:
         if self.last_output_path is not None:
-            open_folder(self.last_output_path)
+            if not open_folder(self.last_output_path):
+                self._toast("Could not open output folder.")
 
     def _cancel_export(self, _button: Gtk.Button) -> None:
         if self.worker is None:

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 from cairo import Context as CairoContext
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import Gio, GLib, Gtk
+gi.require_version("Gst", "1.0")
+from gi.repository import Gio, GLib, Gst, Gtk
+
+Gst.init(None)
 
 
 class PreviewPlayer(Gtk.Box):
@@ -29,8 +33,12 @@ class PreviewPlayer(Gtk.Box):
         self._drag_mode: str | None = None
         self._drag_origin: tuple[float, float] = (0.0, 0.0)
         self._drag_crop = self._crop.copy()
+        self._timeline_audio_clips: list[object] = []
+        self._active_audio_clip_id: str | None = None
+        self._audio_player: Gst.Element | None = None
         self.on_position_changed: Callable[[float, bool], None] | None = None
         self.on_crop_changed: Callable[[bool, float, float, float, float], None] | None = None
+        self.on_crop_mode_changed: Callable[[bool], None] | None = None
 
         overlay = Gtk.Overlay()
         overlay.set_hexpand(True)
@@ -48,6 +56,11 @@ class PreviewPlayer(Gtk.Box):
         self.crop_area.set_vexpand(True)
         self.crop_area.set_draw_func(self._draw_crop_overlay)
         overlay.add_overlay(self.crop_area)
+        self.crop_area.set_can_target(False)
+
+        preview_click = Gtk.GestureClick()
+        preview_click.connect("released", self._preview_clicked)
+        overlay.add_controller(preview_click)
 
         click = Gtk.GestureClick()
         click.connect("pressed", self._crop_click_pressed)
@@ -59,10 +72,10 @@ class PreviewPlayer(Gtk.Box):
         drag.connect("drag-end", self._crop_drag_end)
         self.crop_area.add_controller(drag)
 
+        self.crop_tools_revealer = Gtk.Revealer()
+        self.crop_tools_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
         crop_tools = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         crop_tools.set_halign(Gtk.Align.CENTER)
-        self.crop_toggle = Gtk.ToggleButton(label="Crop")
-        self.crop_toggle.connect("toggled", self._crop_toggled)
         self.apply_crop_button = Gtk.Button(label="Apply")
         self.apply_crop_button.connect("clicked", self._apply_crop)
         self.apply_crop_button.set_visible(False)
@@ -81,7 +94,6 @@ class PreviewPlayer(Gtk.Box):
         reset_button = Gtk.Button(label="Reset")
         reset_button.connect("clicked", self._reset_crop)
         for child in (
-            self.crop_toggle,
             self.apply_crop_button,
             self.cancel_crop_button,
             self.aspect_combo,
@@ -90,15 +102,16 @@ class PreviewPlayer(Gtk.Box):
             reset_button,
         ):
             crop_tools.append(child)
+        self.crop_tools_revealer.set_child(crop_tools)
 
         self.append(overlay)
-        self.append(crop_tools)
 
         GLib.timeout_add(100, self._refresh_position)
 
     def load_file(self, path: str, duration: float) -> None:
         self._duration = max(duration, 0.0)
         self._is_playing = False
+        self._stop_timeline_audio()
         self.video.set_file(Gio.File.new_for_path(path))
         self._emit_position()
 
@@ -113,6 +126,7 @@ class PreviewPlayer(Gtk.Box):
             return
         stream.play()
         self._is_playing = True
+        self._sync_timeline_audio(self.get_position())
         self._emit_position()
 
     def pause(self) -> None:
@@ -120,6 +134,7 @@ class PreviewPlayer(Gtk.Box):
         if stream is not None:
             stream.pause()
         self._is_playing = False
+        self._pause_timeline_audio()
         self._emit_position()
 
     def toggle_playback(self) -> None:
@@ -134,6 +149,7 @@ class PreviewPlayer(Gtk.Box):
             return
         seconds = min(max(seconds, 0.0), self._duration)
         stream.seek(int(seconds * 1_000_000))
+        self._sync_timeline_audio(seconds)
         self._emit_position(seconds)
 
     def get_position(self) -> float:
@@ -154,6 +170,9 @@ class PreviewPlayer(Gtk.Box):
             current = self.get_position()
             if current >= self._duration and self._is_playing:
                 self._is_playing = False
+                self._pause_timeline_audio()
+            elif self._is_playing:
+                self._sync_timeline_audio(current)
             self._emit_position(current)
         return True
 
@@ -166,9 +185,32 @@ class PreviewPlayer(Gtk.Box):
         self._crop = [x, y, width, height]
         self._applied_crop_enabled = enabled
         self._applied_crop = self._crop.copy()
-        self.crop_toggle.set_active(enabled)
+        self.crop_area.set_can_target(enabled)
+        self.crop_tools_revealer.set_reveal_child(enabled)
         self._set_crop_approval_visible(False)
         self.crop_area.queue_draw()
+        self._emit_crop_mode()
+
+    def set_crop_mode(self, enabled: bool) -> None:
+        self._crop_enabled = enabled
+        self.crop_area.set_can_target(enabled)
+        self.crop_tools_revealer.set_reveal_child(enabled)
+        if not enabled:
+            self._drag_mode = None
+            self._set_crop_approval_visible(False)
+        else:
+            self._stage_crop()
+        self.crop_area.queue_draw()
+        self._emit_crop_mode()
+
+    def set_timeline_audio_clips(self, clips: list[object]) -> None:
+        self._timeline_audio_clips = list(clips)
+        self._sync_timeline_audio(self.get_position())
+
+    def set_original_audio_preview_enabled(self, enabled: bool) -> None:
+        stream = self.video.get_media_stream()
+        if stream is not None and hasattr(stream, "set_muted"):
+            stream.set_muted(not enabled)
 
     def _draw_crop_overlay(self, _area: Gtk.DrawingArea, cr: CairoContext, width: int, height: int) -> None:
         if not self._crop_enabled:
@@ -213,8 +255,7 @@ class PreviewPlayer(Gtk.Box):
 
     def _crop_click_pressed(self, _gesture: Gtk.GestureClick, _n_press: int, x: float, y: float) -> None:
         if not self._crop_enabled:
-            self._crop_enabled = True
-            self.crop_toggle.set_active(True)
+            return
         self._drag_mode = self._hit_crop(x, y) or "draw"
         if self._drag_mode == "draw":
             px, py = self._point_to_crop(x, y)
@@ -223,13 +264,14 @@ class PreviewPlayer(Gtk.Box):
 
     def _crop_drag_begin(self, _gesture: Gtk.GestureDrag, x: float, y: float) -> None:
         if not self._crop_enabled:
-            self._crop_enabled = True
-            self.crop_toggle.set_active(True)
+            return
         self._drag_origin = (x, y)
         self._drag_crop = self._crop.copy()
         self._drag_mode = self._hit_crop(x, y) or "move"
 
     def _crop_drag_update(self, _gesture: Gtk.GestureDrag, offset_x: float, offset_y: float) -> None:
+        if not self._crop_enabled:
+            return
         _vx, _vy, video_w, video_h = self._video_rect(self.crop_area.get_width(), self.crop_area.get_height())
         dx = offset_x / max(video_w, 1)
         dy = offset_y / max(video_h, 1)
@@ -332,10 +374,6 @@ class PreviewPlayer(Gtk.Box):
             min(max((y - video_y) / max(video_h, 1), 0.0), 1.0),
         )
 
-    def _crop_toggled(self, button: Gtk.ToggleButton) -> None:
-        self._crop_enabled = button.get_active()
-        self._stage_crop()
-
     def _aspect_changed(self, combo: Gtk.ComboBoxText) -> None:
         label = combo.get_active_text() or "Free"
         self._aspect_ratio = {
@@ -348,23 +386,23 @@ class PreviewPlayer(Gtk.Box):
         self._stage_crop()
 
     def _fit_crop(self, _button: Gtk.Button) -> None:
-        self._crop_enabled = True
-        self.crop_toggle.set_active(True)
+        self.set_crop_mode(True)
         self._crop = self._apply_aspect([0.0, 0.0, 1.0, 1.0])
         self._stage_crop()
 
     def _center_crop(self, _button: Gtk.Button) -> None:
-        self._crop_enabled = True
-        self.crop_toggle.set_active(True)
+        self.set_crop_mode(True)
         self._crop[0] = (1.0 - self._crop[2]) / 2
         self._crop[1] = (1.0 - self._crop[3]) / 2
         self._stage_crop()
 
     def _reset_crop(self, _button: Gtk.Button) -> None:
         self._crop_enabled = False
-        self.crop_toggle.set_active(False)
+        self.crop_area.set_can_target(False)
+        self.crop_tools_revealer.set_reveal_child(False)
         self._crop = [0.0, 0.0, 1.0, 1.0]
         self._stage_crop()
+        self._emit_crop_mode()
 
     def _apply_aspect(self, crop: list[float]) -> list[float]:
         x, y, width, height = crop
@@ -402,7 +440,9 @@ class PreviewPlayer(Gtk.Box):
         self._crop = [0.0, 0.0, 1.0, 1.0]
         self._applied_crop_enabled = False
         self._applied_crop = self._crop.copy()
-        self.crop_toggle.set_active(False)
+        self.crop_area.set_can_target(False)
+        self.crop_tools_revealer.set_reveal_child(False)
+        self._emit_crop_mode()
         self.crop_area.queue_draw()
 
     def _cancel_crop(self, _button: Gtk.Button) -> None:
@@ -410,8 +450,10 @@ class PreviewPlayer(Gtk.Box):
         self._crop = [0.0, 0.0, 1.0, 1.0]
         self._applied_crop_enabled = False
         self._applied_crop = self._crop.copy()
-        self.crop_toggle.set_active(self._crop_enabled)
+        self.crop_area.set_can_target(False)
+        self.crop_tools_revealer.set_reveal_child(False)
         self._set_crop_approval_visible(False)
+        self._emit_crop_mode()
         self.crop_area.queue_draw()
 
     def _crop_is_pending(self) -> bool:
@@ -420,3 +462,59 @@ class PreviewPlayer(Gtk.Box):
     def _set_crop_approval_visible(self, visible: bool) -> None:
         self.apply_crop_button.set_visible(visible)
         self.cancel_crop_button.set_visible(visible)
+
+    def _emit_crop_mode(self) -> None:
+        if self.on_crop_mode_changed is not None:
+            self.on_crop_mode_changed(self._crop_enabled)
+
+    def _preview_clicked(self, _gesture: Gtk.GestureClick, _n_press: int, _x: float, _y: float) -> None:
+        if not self._crop_enabled:
+            self.toggle_playback()
+
+    def _sync_timeline_audio(self, position: float) -> None:
+        clip = self._audio_clip_at(position)
+        if clip is None:
+            self._pause_timeline_audio()
+            self._active_audio_clip_id = None
+            return
+        clip_id = getattr(clip, "id", None)
+        if self._audio_player is None or self._active_audio_clip_id != clip_id:
+            self._stop_timeline_audio()
+            self._audio_player = Gst.ElementFactory.make("playbin")
+            if self._audio_player is None:
+                return
+            self._audio_player.set_property("uri", Path(getattr(clip, "source_path")).resolve().as_uri())
+            self._active_audio_clip_id = clip_id
+        clip_offset = max(position - float(getattr(clip, "timeline_start")), 0.0)
+        source_position = float(getattr(clip, "source_in", 0.0)) + clip_offset
+        should_seek = True
+        if self._audio_player.current_state in {Gst.State.PLAYING, Gst.State.PAUSED}:
+            success, current = self._audio_player.query_position(Gst.Format.TIME)
+            if success:
+                current_seconds = current / Gst.SECOND
+                should_seek = abs(current_seconds - source_position) > 0.35
+        if should_seek:
+            self._audio_player.seek_simple(
+                Gst.Format.TIME,
+                Gst.SeekFlags.FLUSH | Gst.SeekFlags.KEY_UNIT,
+                int(source_position * Gst.SECOND),
+            )
+        self._audio_player.set_state(Gst.State.PLAYING if self._is_playing else Gst.State.PAUSED)
+
+    def _audio_clip_at(self, position: float) -> object | None:
+        for clip in self._timeline_audio_clips:
+            if getattr(clip, "muted", False):
+                continue
+            if float(getattr(clip, "timeline_start")) <= position < float(getattr(clip, "timeline_end")):
+                return clip
+        return None
+
+    def _pause_timeline_audio(self) -> None:
+        if self._audio_player is not None:
+            self._audio_player.set_state(Gst.State.PAUSED)
+
+    def _stop_timeline_audio(self) -> None:
+        if self._audio_player is not None:
+            self._audio_player.set_state(Gst.State.NULL)
+        self._audio_player = None
+        self._active_audio_clip_id = None

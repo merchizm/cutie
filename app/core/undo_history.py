@@ -52,10 +52,6 @@ class UndoHistory:
         self._redo_stack.clear()
         return True
 
-    def discard_latest(self) -> None:
-        if self._undo_stack:
-            self._undo_stack.pop()
-
     def undo(self, current: ProjectState) -> ProjectState | None:
         if not self._undo_stack:
             return None
