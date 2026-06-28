@@ -424,6 +424,31 @@ def test_timeline_audio_offset_is_exported() -> None:
     assert "00:00:03.000" in command
 
 
+def test_trimmed_timeline_audio_source_start_is_exported() -> None:
+    history = UndoHistory(limit=5)
+    state = ProjectState()
+    state.load_source(Path("input.mp4"), duration=10, width=1920, height=1080, has_audio=True)
+    clip = state.add_audio_clip(Path("music.mp3"), duration=6, timeline_start=2)
+
+    assert history.execute(state, TrimClipCommand(clip.id, "left", 4))
+
+    settings = export_settings_from_project(
+        state,
+        Path("out.mp4"),
+        format_name="mp4",
+        video_crf=23,
+        output_width=None,
+        output_height=None,
+        audio_mode="timeline",
+        loop_timeline_audio=True,
+    )
+    command = build_ffmpeg_command(settings)
+    music_input = command.index("music.mp3")
+
+    assert "-ss" in command[:music_input]
+    assert "00:00:02.000" in command[:music_input]
+
+
 def test_multiple_timeline_audio_clips_are_mixed_for_export() -> None:
     state = ProjectState()
     state.load_source(Path("input.mp4"), duration=10, width=1920, height=1080, has_audio=True)

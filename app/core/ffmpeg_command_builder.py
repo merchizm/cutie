@@ -14,6 +14,7 @@ from app.utils.timecode import seconds_to_timecode
 class TimelineAudioClip:
     path: Path
     timeline_start: float
+    source_in: float = 0.0
     loop: bool = True
 
 
@@ -146,7 +147,11 @@ def _build_ffmpeg_command(
         replacement_clips = settings.replacement_audio_clips
         if not replacement_clips and settings.replacement_audio_path is not None:
             replacement_clips = (
-                TimelineAudioClip(settings.replacement_audio_path, settings.audio_timeline_start, settings.loop_audio),
+                TimelineAudioClip(
+                    settings.replacement_audio_path,
+                    settings.audio_timeline_start,
+                    loop=settings.loop_audio,
+                ),
             )
         if not replacement_clips:
             raise ValueError("replacement_audio_path is required when audio_mode is replace")
@@ -155,6 +160,8 @@ def _build_ffmpeg_command(
                 command.extend(["-itsoffset", seconds_to_timecode(clip.timeline_start)])
             if clip.loop:
                 command.extend(["-stream_loop", "-1"])
+            if clip.source_in > 0:
+                command.extend(["-ss", seconds_to_timecode(clip.source_in)])
             command.extend(["-i", str(clip.path)])
 
     if has_segments:
@@ -240,7 +247,12 @@ def export_settings_from_project(
         raise ValueError("No source video loaded")
 
     audio_clips = tuple(
-        TimelineAudioClip(clip.path, clip.timeline_start, loop_timeline_audio and clip.loop)
+        TimelineAudioClip(
+            clip.path,
+            clip.timeline_start,
+            clip.source_in,
+            loop_timeline_audio and clip.loop,
+        )
         for clip in state.active_audio_clips()
     )
     audio_clip = state.active_audio_clip()

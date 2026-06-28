@@ -44,7 +44,6 @@ class PreviewPlayer(Gtk.Box):
         overlay.set_hexpand(True)
         overlay.set_vexpand(True)
         overlay.set_size_request(640, 360)
-        overlay.add_css_class("card")
 
         self.video = Gtk.Video(hexpand=True, vexpand=True)
         self.video.set_size_request(640, 360)
@@ -104,7 +103,16 @@ class PreviewPlayer(Gtk.Box):
             crop_tools.append(child)
         self.crop_tools_revealer.set_child(crop_tools)
 
-        self.append(overlay)
+        self._aspect_frame = Gtk.AspectFrame()
+        self._aspect_frame.set_hexpand(True)
+        self._aspect_frame.set_vexpand(True)
+        self._aspect_frame.set_xalign(0.5)
+        self._aspect_frame.set_yalign(0.5)
+        self._aspect_frame.set_ratio(16 / 9)
+        self._aspect_frame.set_obey_child(False)
+        self._aspect_frame.set_child(overlay)
+        self.append(self._aspect_frame)
+        self._hide_builtin_video_controls()
 
         GLib.timeout_add(100, self._refresh_position)
 
@@ -113,21 +121,28 @@ class PreviewPlayer(Gtk.Box):
         self._is_playing = False
         self._stop_timeline_audio()
         self.video.set_file(Gio.File.new_for_path(path))
+        GLib.idle_add(self._hide_builtin_video_controls)
         self._emit_position()
 
     def set_source_size(self, width: int, height: int) -> None:
         self._source_width = max(width, 0)
         self._source_height = max(height, 0)
+        if self._source_width and self._source_height:
+            self._aspect_frame.set_ratio(self._source_width / self._source_height)
         self.crop_area.queue_draw()
 
     def play(self) -> None:
         stream = self.video.get_media_stream()
         if stream is None:
             return
+        position = self.get_position()
+        if self._duration and position >= self._duration - 0.05:
+            self._seek_stream(stream, 0.0)
+            position = 0.0
         stream.play()
         self._is_playing = True
-        self._sync_timeline_audio(self.get_position())
-        self._emit_position()
+        self._sync_timeline_audio(position)
+        self._emit_position(position)
 
     def pause(self) -> None:
         stream = self.video.get_media_stream()
@@ -148,7 +163,7 @@ class PreviewPlayer(Gtk.Box):
         if stream is None:
             return
         seconds = min(max(seconds, 0.0), self._duration)
-        stream.seek(int(seconds * 1_000_000))
+        self._seek_stream(stream, seconds)
         self._sync_timeline_audio(seconds)
         self._emit_position(seconds)
 
@@ -168,13 +183,39 @@ class PreviewPlayer(Gtk.Box):
     def _refresh_position(self) -> bool:
         if self._duration:
             current = self.get_position()
-            if current >= self._duration and self._is_playing:
-                self._is_playing = False
-                self._pause_timeline_audio()
+            if current >= self._duration - 0.05 and self._is_playing:
+                self._finish_playback(current)
             elif self._is_playing:
                 self._sync_timeline_audio(current)
-            self._emit_position(current)
+                self._emit_position(current)
+            else:
+                self._emit_position(current)
         return True
+
+    def _finish_playback(self, position: float) -> None:
+        stream = self.video.get_media_stream()
+        if stream is not None:
+            stream.pause()
+        self._is_playing = False
+        self._sync_timeline_audio(0.0)
+        self._emit_position(min(position, self._duration))
+
+    def _seek_stream(self, stream: Gtk.MediaStream, seconds: float) -> None:
+        stream.seek(int(seconds * 1_000_000))
+
+    def _hide_builtin_video_controls(self) -> bool:
+        self._hide_media_controls(self.video)
+        return False
+
+    def _hide_media_controls(self, widget: Gtk.Widget) -> None:
+        child = widget.get_first_child()
+        while child is not None:
+            next_child = child.get_next_sibling()
+            if isinstance(child, Gtk.MediaControls):
+                child.set_visible(False)
+                child.set_can_target(False)
+            self._hide_media_controls(child)
+            child = next_child
 
     def _emit_position(self, position: float | None = None) -> None:
         if self.on_position_changed is not None:

@@ -175,13 +175,6 @@ class CutieWindow(Adw.ApplicationWindow):
         self.original_audio_button.connect("clicked", self._toggle_original_audio)
         self.reset_original_button = self._tool_button("edit-clear-symbolic", "Reset to original video")
         self.reset_original_button.connect("clicked", self._reset_to_original)
-        self.zoom_out_button = self._tool_button("zoom-out-symbolic", "Zoom out timeline")
-        self.zoom_out_button.connect("clicked", lambda _button: self.timeline.zoom_out())
-        self.zoom_in_button = self._tool_button("zoom-in-symbolic", "Zoom in timeline")
-        self.zoom_in_button.connect("clicked", lambda _button: self.timeline.zoom_in())
-        self.fit_button = Gtk.Button(label="Fit")
-        self.fit_button.set_tooltip_text("Fit timeline to view")
-        self.fit_button.connect("clicked", lambda _button: self.timeline.fit())
         self.undo_button = self._tool_button("edit-undo-symbolic", "Undo")
         self.undo_button.connect("clicked", lambda _button: self._undo())
         self.redo_button = self._tool_button("edit-redo-symbolic", "Redo")
@@ -196,9 +189,6 @@ class CutieWindow(Adw.ApplicationWindow):
             self.reset_original_button,
             self.undo_button,
             self.redo_button,
-            self.zoom_out_button,
-            self.zoom_in_button,
-            self.fit_button,
         ):
             toolbar.append(child)
         return toolbar
