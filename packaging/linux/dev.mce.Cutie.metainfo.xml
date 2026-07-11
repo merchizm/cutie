@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>dev.mce.Cutie</id>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>TODO</project_license>
+  <project_license>MIT</project_license>
   <name>Cutie</name>
   <summary>Lightweight FFmpeg video editing</summary>
   <description>

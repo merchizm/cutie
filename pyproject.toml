@@ -8,9 +8,9 @@ version = "0.1.0"
 description = "A small Linux GTK4/libadwaita app for lightweight FFmpeg video editing."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "LicenseRef-TODO"
+license = "MIT"
 authors = [
-  { name = "TODO", email = "TODO@example.com" },
+  { name = "Meric Enes Kayalar", email = "merichrocks@gmail.com" },
 ]
 keywords = ["gtk", "ffmpeg", "video", "editor"]
 classifiers = [

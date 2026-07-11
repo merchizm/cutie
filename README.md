@@ -73,8 +73,8 @@ python3 -m tests.run_backend
 
 ## Release
 
-GitHub Actions builds source and wheel distributions from `pyproject.toml` and
-publishes them to GitHub Releases.
+For maintainers, GitHub Actions builds source and wheel distributions from
+`pyproject.toml` and publishes them to GitHub Releases.
 
 1. Update `version` in `pyproject.toml`.
 2. Commit the change.
@@ -97,5 +97,8 @@ Linux desktop packaging files live in `packaging/linux/`.
 - hicolor icons: `packaging/linux/icons/hicolor/`
 
 Before publishing an installable app package, replace the remaining `TODO`
-metadata, set the final license, and add production screenshots to the AppStream
-metadata.
+metadata and add production screenshots to the AppStream metadata.
+
+## License
+
+Cutie is released under the [MIT License](LICENSE).
