@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Cutie
+Comment=Lightweight FFmpeg video editing
+Exec=cutie
+Icon=dev.mce.Cutie
+Terminal=false
+Categories=AudioVideo;Video;GTK;
+StartupNotify=true

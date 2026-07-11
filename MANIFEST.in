@@ -1,0 +1,2 @@
+include cutie.png
+recursive-include packaging/linux *.desktop *.md *.png *.xml

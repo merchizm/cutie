@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cutie-video"
+version = "0.1.0"
+description = "A small Linux GTK4/libadwaita app for lightweight FFmpeg video editing."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "LicenseRef-TODO"
+authors = [
+  { name = "TODO", email = "TODO@example.com" },
+]
+keywords = ["gtk", "ffmpeg", "video", "editor"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: X11 Applications :: GTK",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Video",
+]
+dependencies = [
+  "PyGObject>=3.46",
+]
+
+[project.urls]
+Homepage = "https://github.com/merchizm/cutie"
+Repository = "https://github.com/merchizm/cutie"
+Issues = "https://github.com/merchizm/cutie/issues"
+
+[project.gui-scripts]
+cutie = "app.window:main"
+
+[tool.setuptools]
+packages = ["app", "app.core", "app.utils", "app.widgets"]
+
+[tool.setuptools.data-files]
+"share/applications" = ["packaging/linux/dev.mce.Cutie.desktop"]
+"share/metainfo" = ["packaging/linux/dev.mce.Cutie.metainfo.xml"]
+"share/icons/hicolor/512x512/apps" = ["packaging/linux/icons/hicolor/512x512/apps/dev.mce.Cutie.png"]
+"share/icons/hicolor/256x256/apps" = ["packaging/linux/icons/hicolor/256x256/apps/dev.mce.Cutie.png"]
+"share/icons/hicolor/128x128/apps" = ["packaging/linux/icons/hicolor/128x128/apps/dev.mce.Cutie.png"]
+"share/icons/hicolor/64x64/apps" = ["packaging/linux/icons/hicolor/64x64/apps/dev.mce.Cutie.png"]
+"share/icons/hicolor/48x48/apps" = ["packaging/linux/icons/hicolor/48x48/apps/dev.mce.Cutie.png"]
+"share/icons/hicolor/32x32/apps" = ["packaging/linux/icons/hicolor/32x32/apps/dev.mce.Cutie.png"]

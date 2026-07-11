@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.mce.Cutie</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>TODO</project_license>
+  <name>Cutie</name>
+  <summary>Lightweight FFmpeg video editing</summary>
+  <description>
+    <p>
+      Cutie is a Linux GTK4/libadwaita app for lightweight video editing,
+      cropping, timeline edits, audio replacement, and format conversion.
+    </p>
+  </description>
+  <launchable type="desktop-id">dev.mce.Cutie.desktop</launchable>
+  <content_rating type="oars-1.1" />
+  <url type="homepage">https://github.com/merchizm/cutie</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>TODO: Add a production screenshot before publishing.</caption>
+      <image>TODO</image>
+    </screenshot>
+  </screenshots>
+  <releases>
+    <release version="0.1.0" date="TODO" />
+  </releases>
+</component>
